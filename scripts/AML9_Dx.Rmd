@@ -175,7 +175,7 @@ library(RColorBrewer)
 
 ####1. Cell type classification using an integrated reference ####
 #Load the BM cells
-load(file="~/5_All_BM_samples.merge.object.Scaled.RData")
+load(file="~/VanGalen.obj.Rdata")
 dt.list <- unlist(list(c(combined.obj.AML,merge.object)))
 names(dt.list) <- c("AML9_Dx","BM")
 
