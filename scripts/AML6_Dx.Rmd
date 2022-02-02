@@ -1,0 +1,281 @@
+---
+title: "AML6_Dx"
+output:
+  html_document:
+    toc: true
+    theme: united
+date: "`r Sys.time()`"
+author: jtrincado
+---
+
+
+#### 1. Apply QC
+
+```{r part1, fig.height=10, fig.width=12, message=FALSE}
+library(Seurat) 
+library(ggplot2) 
+library(ggExtra) 
+library(dplyr)
+library(data.table)
+library(grid)
+library(RColorBrewer)
+
+#### 1. Load the samples. #### 
+
+# CD34+
+CD34.data <- Read10X(data.dir = "~/AML6_Dx_CD34pos/filtered_feature_bc_matrix/")
+CD34 <- CreateSeuratObject(counts = CD34.data, project = "AML")
+CD34
+#Add metadata
+mito.genes <- grep(pattern = "^MT-", x = rownames(x = CD34), value = TRUE)
+percent.counts <- Matrix::colSums(CD34@assays$RNA@data[mito.genes,])
+percent.mito <- Matrix::colSums(CD34@assays$RNA@data[mito.genes,])/Matrix::colSums(CD34@assays$RNA@data)
+CD34 <- AddMetaData(object = CD34, metadata = percent.mito, col.name = "percent.mito")
+CD34 <- AddMetaData(object = CD34, metadata = percent.counts, col.name = "percent.counts")
+CD34$log10_nCount_RNA <- log10(CD34$nCount_RNA)
+CD34$Sample_id <- "CD34"
+# Read in a list of cell cycle markers, from Tirosh et al, 2015
+cc.genes <- readLines(con = "~/regev_lab_cell_cycle_genes.txt")
+# We can segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes[1:43]
+g2m.genes <- cc.genes[44:97]
+CD34 <- CellCycleScoring(object = CD34, s.genes, g2m.genes,set.ident = FALSE, nbin = 20)
+
+upper_bound <- mean(CD34$log10_nCount_RNA) + 2*sd(CD34$log10_nCount_RNA)
+lower_bound <- mean(CD34$log10_nCount_RNA) - 2*sd(CD34$log10_nCount_RNA)
+p1 <- FeatureScatter(object = CD34, feature1 = "log10_nCount_RNA", feature2 = "percent.mito")
+p2 <- FeatureScatter(object = CD34, feature1 = "log10_nCount_RNA", feature2 = "nFeature_RNA")
+p1 + geom_vline(xintercept=lower_bound) + geom_hline(yintercept=0.2)
+p2 + geom_vline(xintercept=lower_bound) + geom_hline(yintercept=400) + geom_hline(yintercept=6000)
+
+# We filter out cells that have unique gene counts less than 200 and cells too expressed (could be doublets)
+CD34 <- subset(x = CD34, subset = nFeature_RNA > 400 & nFeature_RNA < 6000  & percent.mito < 0.2 & log10_nCount_RNA > lower_bound)
+CD34
+
+# CD38+
+CD38.data <- Read10X(data.dir = "~/AML6_Dx_CD38pos/filtered_feature_bc_matrix/")
+CD38 <- CreateSeuratObject(counts = CD38.data, project = "AML")
+CD38
+#Add metadata
+mito.genes <- grep(pattern = "^MT-", x = rownames(x = CD38), value = TRUE)
+percent.counts <- Matrix::colSums(CD38@assays$RNA@data[mito.genes,])
+percent.mito <- Matrix::colSums(CD38@assays$RNA@data[mito.genes,])/Matrix::colSums(CD38@assays$RNA@data)
+CD38 <- AddMetaData(object = CD38, metadata = percent.mito, col.name = "percent.mito")
+CD38 <- AddMetaData(object = CD38, metadata = percent.counts, col.name = "percent.counts")
+CD38$log10_nCount_RNA <- log10(CD38$nCount_RNA)
+CD38$Sample_id <- "CD38"
+# Read in a list of cell cycle markers, from Tirosh et al, 2015
+cc.genes <- readLines(con = "~/regev_lab_cell_cycle_genes.txt")
+# We can segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes[1:43]
+g2m.genes <- cc.genes[44:97]
+CD38 <- CellCycleScoring(object = CD38, s.genes, g2m.genes,set.ident = FALSE,nbin = 15)
+
+upper_bound <- mean(CD38$log10_nCount_RNA) + 2*sd(CD38$log10_nCount_RNA)
+lower_bound <- mean(CD38$log10_nCount_RNA) - 2*sd(CD38$log10_nCount_RNA)
+p1 <- FeatureScatter(object = CD38, feature1 = "log10_nCount_RNA", feature2 = "percent.mito")
+p2 <- FeatureScatter(object = CD38, feature1 = "log10_nCount_RNA", feature2 = "nFeature_RNA")
+p1 + geom_vline(xintercept=lower_bound) + geom_vline(xintercept=upper_bound) + geom_hline(yintercept=0.2)
+p2 + geom_vline(xintercept=lower_bound) + geom_vline(xintercept=4.5) + geom_hline(yintercept=400) + geom_hline(yintercept=5500)
+
+# We filter out cells that have unique gene counts less than 200 and cells too expressed (could be doublets)
+CD38 <- subset(x = CD38, subset = nFeature_RNA > 400 & nFeature_RNA < 5500 & percent.mito < 0.2 & log10_nCount_RNA > lower_bound )
+CD38
+
+#### 2. Combine the datasets #### 
+combined.obj.AML <- merge(x = CD34, y = CD38, add.cell.ids = c("CD34","CD38") , project = "AML6_Dx")
+
+
+#### 3. Normalize the data #### 
+combined.obj.AML <- NormalizeData(object = combined.obj.AML, normalization.method = "LogNormalize", scale.factor = 1e4)
+combined.obj.AML <- FindVariableFeatures(combined.obj.AML, selection.method = "vst", nfeatures = 2000)
+combined.obj.AML <- ScaleData(combined.obj.AML,vars.to.regress = c("nCount_RNA","percent.mito"), features = rownames(combined.obj.AML))
+
+#### 4. PCA and markers ####
+combined.obj.AML <- RunPCA(combined.obj.AML, npcs = 40)
+ElbowPlot(combined.obj.AML,ndims = 40)
+#Use first 15 PC
+n_PC = 15
+DimHeatmap(combined.obj.AML, dims = c(1:n_PC), cells = 500, balanced = TRUE)
+combined.obj.AML <- FindNeighbors(combined.obj.AML, dims = 1:n_PC)
+combined.obj.AML <- FindClusters(combined.obj.AML, resolution = 0.5)
+head(Idents(combined.obj.AML), 5)
+
+
+#How many cells from each dataset are in the clusters
+table(combined.obj.AML$Sample_id,combined.obj.AML$seurat_clusters)
+
+#UMAP
+combined.obj.AML <- RunUMAP(combined.obj.AML, dims = 1:n_PC)
+DimPlot(combined.obj.AML, reduction = "umap",  pt.size = 1.2) + annotation_custom(grob)
+DimPlot(object = combined.obj.AML, reduction = 'umap', pt.size = 1.2, group.by = "Phase")
+
+#### 5. Get the markers #### 
+markers.AML <- FindAllMarkers(combined.obj.AML, only.pos = TRUE, logfc.threshold = 0.25)
+table(markers.AML$cluster)
+
+#Plot a heatmap with the markers
+DoHeatmap(combined.obj.AML, features = top8$gene) + NoLegend()
+
+#Plot the expresion of CD34 and CD38
+FeaturePlot(combined.obj.AML, features = c("CD34", "CD38"))
+
+
+
+
+```
+
+#### 2. Get the LSC6 score
+
+```{r part2, fig.height=4, fig.width=6, message=FALSE}
+library(Seurat) 
+library(ggplot2) 
+library(dplyr)
+library(data.table)
+library(grid)
+library(RColorBrewer)
+library("UpSetR")
+library(forcats) 
+
+####1. Assign the scores manually (6 gene siganture Elsayed et al, 2020)
+#In the paper, they determine some weights to each gene. Apply this weights manually to the expression of each gene
+LSC_signature <- list(c("DNMT3B","CD34","ADGRG1","SOCS2","SPINK2","FAM30A"))
+filtered_data <- combined.obj.AML@assays$RNA@scale.data[which(rownames(combined.obj.AML@assays$RNA@scale.data)%in%unlist(LSC_signature)),]
+rownames(filtered_data)
+Elsayed_model <- function(x){
+  x[1]*0.0171+x[2]*0.109+x[3]*0.141+x[4]*0.0516+x[5]*0.054+x[6]*0.189
+  }
+cells_scores <- apply(filtered_data,2,function(x)Elsayed_model(x))
+combined.obj.AML <- AddMetaData(object = combined.obj.AML, metadata = cells_scores, col.name = "Elsayed_LSC_score")
+VlnPlot(combined.obj.AML,features = "Elsayed_LSC_score") + geom_boxplot()
+FeaturePlot(combined.obj.AML,features = "Elsayed_LSC_score", pt.size = 1.3)
+
+df1 <- data.frame(clusters=Idents(combined.obj.AML),Elsayed_LSC_score=combined.obj.AML$Elsayed_LSC_score)
+df2 <- df1 %>% group_by(clusters) %>% summarise(median=median(Elsayed_LSC_score))
+quantiles <- quantile(df2$median,probs = seq(0, 1, 0.1))
+
+ggplot(df1,aes(x=fct_reorder(clusters, Elsayed_LSC_score, .fun = median, .desc = TRUE),y=Elsayed_LSC_score, fill=clusters)) +
+  geom_boxplot(outlier.shape = NA) +
+  theme_classic() +
+  NoLegend() +
+  coord_cartesian(ylim=c(-0.1,0.3)) +
+  geom_hline(yintercept = quantiles[10], linetype="dashed")
+
+```
+
+
+#### 3. Predict the class of the cells using the markers and the expression of the BM cells form Van_Galen paper
+
+```{r part3, fig.height=10, fig.width=12, message=FALSE}
+library(Seurat) 
+library(ggplot2) 
+library(dplyr)
+library(data.table)
+library(grid)
+library(RColorBrewer)
+
+####1. Cell type classification using an integrated reference ####
+#Load the BM cells
+load(file="~/5_All_BM_samples.merge.object.Scaled.RData")
+dt.list <- unlist(list(c(combined.obj.AML,merge.object)))
+names(dt.list) <- c("AML6_Dx","BM")
+
+anchors <- FindTransferAnchors(reference = merge.object, query = combined.obj.AML, dims = 1:30)
+predictions <- TransferData(anchorset = anchors, refdata = merge.object$predictionRF, dims = 1:30)
+prediction <- factor(predictions$predicted.id,levels=c("HSC","Prog","GMP","ProMono","Mono","cDC","pDC","earlyEry","lateEry","ProB","B","Plasma","T","CTL","NK"))
+names(prediction) <- rownames(predictions)
+combined.obj.AML <- AddMetaData(object=combined.obj.AML, metadata = prediction, col.name = "prediction")
+table(combined.obj.AML$Sample_id,combined.obj.AML$prediction)
+aux_df <- data.frame(Condtion=combined.obj.AML$Sample_id,Predicted_cell_type=combined.obj.AML$prediction,Clusters=Idents(combined.obj.AML))
+ggplot(aux_df, aes(Predicted_cell_type,fill=Condtion)) +
+  geom_bar() 
+#Plot the celltypes by cluster
+getPalette = colorRampPalette(brewer.pal(12, "Paired"))
+colors = getPalette(15)
+ggplot(aux_df, aes(Clusters,fill=Predicted_cell_type)) +
+  geom_bar() + 
+  scale_fill_manual(values = colors)
+
+#Print the UMAPs with the prediction from BM
+DimPlot(combined.obj.AML, reduction = "umap",  pt.size = 1.2) #+ scale_color_manual(values = colors)
+DimPlot(combined.obj.AML, reduction = "umap",  pt.size = 1.2, label = TRUE, group.by = "prediction") + 
+  scale_color_manual(values = colors)
+
+
+```
+
+#### 4. Project the predictions from Velten onto our UMAP
+
+```{r part4, fig.height=10, fig.width=12, message=FALSE}
+library(Seurat) 
+library(ggplot2) 
+library(dplyr)
+library(data.table)
+library(grid)
+library(RColorBrewer)
+library(openxlsx)
+
+#1. Load the predictions from Lars
+Velten_proj <- read.xlsx(xlsxFile="~/Velten_projections.xlsx")
+#The celltypes predicted by Lars are superspecific. Create an upper classification
+Velten_proj$celltype2 <- NA
+Velten_proj$celltype2[grepl("T cell",Velten_proj$celltype,ignore.case = TRUE)] <- "T cells"
+Velten_proj$celltype2[grepl("B cell",Velten_proj$celltype,ignore.case = TRUE)] <- "B cells"
+Velten_proj$celltype2[grepl("NK",Velten_proj$celltype,ignore.case = TRUE)] <- "NK cells"
+Velten_proj$celltype2[grepl("erythro",Velten_proj$celltype,ignore.case = TRUE)] <- "erythroid"
+Velten_proj$celltype2[grepl("Monocyte",Velten_proj$celltype,ignore.case = TRUE)] <- "Monocytes"
+Velten_proj$celltype2[grepl("HSCs & MPPs",Velten_proj$celltype,ignore.case = TRUE)] <- "HSCs & MPPs"
+Velten_proj$celltype2[grepl("blasts",Velten_proj$celltype,ignore.case = TRUE)] <- "blasts"
+Velten_proj$celltype2[grepl("Lymphoid-primed",Velten_proj$celltype,ignore.case = TRUE)] <- "LMPPs"
+Velten_proj$celltype2[grepl("Megakaryocyte",Velten_proj$celltype,ignore.case = TRUE)] <- "Megakaryocyte"
+Velten_proj$celltype2[grepl("Mesenchymal",Velten_proj$celltype,ignore.case = TRUE)] <- "Mesenchymal"
+Velten_proj$celltype2[grepl("Myeloblast",Velten_proj$celltype,ignore.case = TRUE)] <- "Myeloblasts"
+Velten_proj$celltype2[grepl("myelocyte",Velten_proj$celltype,ignore.case = TRUE)] <- "Myelocytes"
+Velten_proj$celltype2[grepl("Plasma cell",Velten_proj$celltype,ignore.case = TRUE)] <- "B cells"
+Velten_proj$celltype2[grepl("Eosinophil-basophil-mast cell progenitors",Velten_proj$celltype,ignore.case = TRUE)] <- "Eosinophil-basophil-mast prog"
+Velten_proj$celltype2[grepl("dendritic cell",Velten_proj$celltype,ignore.case = TRUE)] <- "dendritic cells"
+
+#Create a common palette color for all datasets
+getPalette = colorRampPalette(brewer.pal(12, "Paired"))
+colors = getPalette(length(unique(Velten_proj$celltype2)))
+aux <- colors[5]
+colors[5] <- colors[1]
+colors[1] <- aux
+colors[2] <- "#000000"
+colors[3] <- "#e8f52f"
+aux <- colors[4]
+colors[4] <- colors[7]
+colors[7] <- aux
+colors[1] <- "#11fc00"
+colors[12] <- "#ff00c3"
+aux <- colors[9]
+colors[9] <- colors[11]
+colors[11] <- aux
+colors2 <- c(colors[1:3],colors[7],colors[c(4:6,8:length(colors))])
+names(colors2) <- levels(factor(Velten_proj$celltype2))
+colors2[7] <- "#0070c4"
+
+#Filter the AML6_Dx cells (AML6 on Velten table)
+Velten_proj_f <- Velten_proj[which(Velten_proj$patient=="AML6"),]
+#Format the bc
+Velten_proj_f$cellBC <- unlist(lapply(Velten_proj_f$X1,function(x)paste0(strsplit(x,"\\-")[[1]][1:2],collapse = "-")))
+#Add the CD sorting as prefix and the number id sa suffix
+Velten_proj_f$cellBC2 <- apply(Velten_proj_f,1,function(x)paste0(x[7],"_",x[10]))
+
+#Add it to the Seurat obj
+celltype <- Velten_proj_f$celltype2
+names(celltype) <- Velten_proj_f$cellBC2
+combined.obj.AML <- AddMetaData(object = combined.obj.AML, metadata = celltype, col.name = "celltype")
+
+#Print the UMAPs with the prediction from Lars
+DimPlot(combined.obj.AML, reduction = "umap",  pt.size = 1.2, label = TRUE, group.by = "celltype") + 
+  scale_color_manual(values = colors2)
+table(combined.obj.AML$celltype)
+
+df <- data.frame(cellBC=colnames(combined.obj.AML),suffix=unlist(lapply(colnames(combined.obj.AML),function(x)strsplit(x,"_")[[1]][3])),Sorting=combined.obj.AML$Sample_id,celltype=combined.obj.AML$celltype,Clusters=Idents(combined.obj.AML))
+
+#generate a barplot
+ggplot(df,aes(Clusters,fill=celltype)) +
+  geom_bar()  + 
+  scale_fill_manual(values = colors2)
+```
