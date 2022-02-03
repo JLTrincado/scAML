@@ -1,0 +1,765 @@
+---
+title: "inv16_integration_Dx"
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###)
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+date: "`r Sys.time()`"
+author: jtrincado
+---
+
+## 1. Integration of Dx inv16 samples
+
+```{r part1, echo=FALSE, fig.height=10, fig.width=12, message=FALSE}
+library(Seurat) 
+library(ggplot2) 
+library(ggExtra) 
+library(dplyr)
+library(data.table)
+library(grid)
+library(RColorBrewer)
+library(forcats) 
+library(Nebulosa)
+
+#### 1. Load samples processed from AML3.Rmd, AML5.Rmd, AML7_Dx.Rmd and AML10_Dx.Rmd
+
+#### 2.  Integrate the datasets ####
+dt.list <- unlist(list(c(AML3,AML5,AML7_Dx,AML10_Dx)))
+for (i in 1:length(dt.list)) {
+    dt.list[[i]] <- NormalizeData(dt.list[[i]], verbose = FALSE)
+    dt.list[[i]] <- FindVariableFeatures(dt.list[[i]], selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+}
+anchors <- FindIntegrationAnchors(object.list = dt.list, dims = 1:30)
+integrated.obj <- IntegrateData(anchorset = anchors, dims = 1:30)
+
+DefaultAssay(integrated.obj) <- "integrated"
+
+#### 3. PCA and markers ####
+integrated.obj <- ScaleData(integrated.obj,vars.to.regress = c("nCount_RNA","percent.mito"), features = VariableFeatures(integrated.obj))
+integrated.obj <- RunPCA(integrated.obj, features = VariableFeatures(integrated.obj), npcs = 40)
+ElbowPlot(integrated.obj,ndims = 40)
+
+#Use first 22 PC
+n_PC = 22
+integrated.obj <- FindNeighbors(integrated.obj, dims = 1:n_PC)
+
+####Res = 1 ####
+integrated.obj <- FindClusters(integrated.obj, resolution = 1)
+head(Idents(integrated.obj), 5)
+
+#PCA
+DimPlot(integrated.obj, reduction = "pca")
+n_cells = ncol(integrated.obj)
+grob <- grobTree(textGrob(paste0("n = ",n_cells), x=0.05,  y=0.95, hjust=0,gp=gpar(fontsize=22)))
+getPalette = colorRampPalette(brewer.pal(11, "Set1"))
+colors = getPalette(11)
+
+#UMAP
+integrated.obj <- RunUMAP(integrated.obj, dims = 1:n_PC)
+# Plot
+DimPlot(integrated.obj, reduction = "umap", group.by = "Sample_id", pt.size = 1.2 ) + annotation_custom(grob)
+DimPlot(object = integrated.obj, reduction = 'umap', pt.size = 1.2, group.by = "Phase") + annotation_custom(grob)
+DimPlot(object = integrated.obj, reduction = 'umap', pt.size = 1.2, group.by = "old_clustering", label = TRUE)  + annotation_custom(grob)
+integrated.obj$prediction <- factor(integrated.obj$prediction,levels=c("HSC","Prog","GMP","ProMono","Mono","cDC","pDC","earlyEry","lateEry","ProB","B","Plasma","T","CTL","NK"))
+getPalette = colorRampPalette(brewer.pal(12, "Paired"))
+colors2 = getPalette(15)
+names(colors2) <- c("HSC","Prog","GMP","ProMono","Mono","cDC","pDC","earlyEry","lateEry","ProB","B","Plasma","T","CTL","NK")
+DimPlot(object = integrated.obj, reduction = 'umap', pt.size = 1.2, group.by = "prediction", label = TRUE, order = c("HSC")) +  scale_color_manual(values = colors2)  + NoAxes()
+colorsVelten <- readRDS(file="~/predictions_Velten_colorpalette.rds")
+colorsVelten2 <- colorsVelten[c("HSCs & MPPs","LMPPs","Myeloblasts","Myelocytes","Monocytes","Eosinophil-basophil-mast prog","Megakaryocyte","erythroid","dendritic cells","B cells","T cells","NK cells","blasts")]
+integrated.obj.aux <- subset(integrated.obj,cells = colnames(integrated.obj)[which(!is.na(integrated.obj$celltype))])
+DimPlot(object = integrated.obj.aux, reduction = 'umap', pt.size = 1.2, group.by = "celltype", label = TRUE, order = c("HSCs & MPPs")) +  scale_color_manual(values = colorsVelten2)
+
+#Use the 6 gene signature from Elsayed with the weights
+LSC_signature <- list(c("DNMT3B","CD34","ADGRG1","SOCS2","SPINK2","FAM30A"))
+filtered_data <- integrated.obj@assays$RNA@scale.data[which(rownames(integrated.obj@assays$RNA@scale.data)%in%unlist(LSC_signature)),]
+Elsayed_model <- function(x){
+  x[1]*0.0171+x[2]*0.109+x[3]*0.141+x[4]*0.0516+x[5]*0.054+x[6]*0.189
+  }
+cells_scores <- apply(filtered_data,2,function(x)Elsayed_model(x))
+integrated.obj <- AddMetaData(object = integrated.obj, metadata = cells_scores, col.name = "Elsayed_LSC_score_integrated")
+aux_df1 <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,orig.name=integrated.obj$orig.name,new_clustering=Idents(integrated.obj),LSC6=integrated.obj$Elsayed_LSC_score_integrated,Sorting=integrated.obj$Sample_id)
+
+ggplot(aux_df1, aes(x=umap1, y=umap2)) + geom_point(aes(color=LSC6),size = 1.2) + ggtitle("LSC6") + scale_colour_gradient(low = "white", high = "darkblue") + theme_classic() + NoAxes()
+
+#Plot the celltypes predictions with normal BM by cluster
+integrated.obj$prediction <- factor(integrated.obj$prediction,levels=c("HSC","Prog","GMP","ProMono","Mono","cDC","pDC","earlyEry","lateEry","ProB","B","Plasma","T","CTL","NK"))
+aux_df <- data.frame(Condtion=integrated.obj$Sample_id,Predicted_cell_type=integrated.obj$prediction,Clusters=Idents(integrated.obj),Orig.name=integrated.obj$orig.name)
+ggplot(aux_df, aes(Predicted_cell_type,fill=Condtion)) +
+  geom_bar() 
+getPalette = colorRampPalette(brewer.pal(12, "Paired"))
+colors = getPalette(15)
+ggplot(aux_df, aes(Clusters,fill=Predicted_cell_type)) +
+  geom_bar() + 
+  scale_fill_manual(values = colors)
+cell_type_plot <- DimPlot(integrated.obj, reduction = "umap",  pt.size = 1.2, label = TRUE, group.by = "prediction") + 
+  scale_color_manual(values = colors)
+cell_type_plot
+
+#Plot also how are the samples distributed along the clusters
+ggplot(aux_df, aes(Clusters,fill=Orig.name)) +
+  geom_bar() 
+#Plot the old clusters how are distributed along the clusters
+getPalette = colorRampPalette(brewer.pal(12, "Spectral"))
+colors = getPalette(length(unique(aux_df$Old.Clusters)))
+ggplot(aux_df, aes(Clusters,fill=Old.Clusters)) +
+  geom_bar() +
+  geom_text(aes(label=Old.Clusters),stat="count",position=position_stack(0.5),size=3) +
+  scale_fill_manual(values = colors)
+print(table(aux_df$Clusters,aux_df$Old.Clusters))
+
+#Plot the Hypoxia
+Hypoxia_genes <- list(c("ABCB1","ABCG2","ADM","ADRA1B","AK4","ALDOA","ALDOC","ANGPT2","ANKRD37","ANXA1","BHLHE40","BHLHE41","BNIP3","BNIP3L","CA9","CAD","CALCRL","CAPG","CCNG2","CCR7","CD99","CDKN1A","CITED2","COL5A1","CP","CTGF","CTSD","CXCL12","CXCR4","CYP2S1","DDIT4","DEC1","EDN1","EGLN1","EGLN3","ENG","ENO1","EPO","ERO1A","ETS1","FAM162A","FECH","FN1","FURIN","GADD45B","GAPDH","GPI","GPX3","HK1","HK2","HMOX1","HSP90B1","ID2","IGF2","IGFBP1","IGFBP2","IGFBP3","ITGB2","JUNB","KDM3A","KDM4B","KITLG","KRT14","KRT18","KRT19","LDHA","LEP","LGALS1","LOX","LRP1","MCL1","MET","MMP14","MMP2","MMP9","MXI1","NAMPT","NOS2","NOS3","NPM1","NR4A1","NRN1","NT5E","P4HA1","P4HA2","P4HTM","PDGFA","PDK1","PFKFB3","PFKL","PGK1","PKM","PLAUR","PMAIP1","PPP5C","PROK1","RCOR2","S100A4","SENP1","SERPINE1","SLC2A1","SLC2A3","SOX9","STC2","TCF3","TERT","TF","TFF3","TFRC","TGFA","TGFB3","TGM2","TPI1","TWIST1","UCN2","VEGFA","VIM","ZEB1","ZEB2"))
+integrated.obj <- AddModuleScore(object = integrated.obj, features = Hypoxia_genes, name="Hypoxia")
+aux_df1 <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,orig.name=integrated.obj$orig.name,new_clustering=Idents(integrated.obj),Sorting=integrated.obj$Sample_id,Hypoxia=integrated.obj$Hypoxia1)
+ggplot(aux_df1, aes(x=umap1, y=umap2)) + geom_point(aes(color=Hypoxia),size = 1.2) + ggtitle("Hypoxia (score)") + scale_colour_gradient(low = "white", high = "darkblue") + NoAxes() + theme_classic()
+
+#Plot the actual expression of CD34 and CD38 on the UMAP
+FeaturePlot(integrated.obj, features = c("CD34","CD38"), blend = TRUE, cols = c("lightgrey", "#ff5757", "#65dae0"), order = T)
+
+#Assign the LSC clusters from each sample to the integrated object
+aux_df <- data.frame(clusters=Idents(integrated.obj),sample=integrated.obj$Sample_id,colnames=colnames(integrated.obj),old_clustering=integrated.obj$old_clustering)
+aux_df$LSC_label <- "NonLSC 38+"
+aux_df$LSC_label[which(aux_df$old_clustering%in%c("AML3_0","AML5_1","AML7_Dx_0","AML10_Dx_5"))] <- "LSC 34+"
+aux_df$LSC_label[which(aux_df$old_clustering%in%c("AML10_Dx_0","AML10_Dx_1"))] <- "LSC2 34+"
+aux_df$LSC_label[which(!(aux_df$old_clustering%in%c("AML3_0","AML5_1","AML7_Dx_0","AML10_Dx_5","AML10_Dx_0","AML10_Dx_1")) & aux_df$sample=="CD34")] <- "NonLSC 34+"
+aux_df$LSC_label <- factor(aux_df$LSC_label,levels = c("LSC AML16 34+","LSC 34+","NonLSC 34+","NonLSC 38+"))
+LSC_label_aux <- aux_df$LSC_label
+names(LSC_label_aux) <- aux_df$colnames
+integrated.obj <- AddMetaData(object = integrated.obj, metadata = LSC_label_aux, col.name = "LSC_label")
+
+DimPlot(object = integrated.obj, reduction = 'umap', pt.size = 1.2, group.by = "LSC_label", label = TRUE) 
+
+#There is special upregulation of HBB in sample AML16
+DefaultAssay(integrated.obj) <- "RNA"
+HBB_plot <- FeaturePlot(integrated.obj,features = "HBB", pt.size = 1)
+VlnPlot(integrated.obj,features = "HBB", group.by = "LSC_label")
+DefaultAssay(integrated.obj) <- "integrated"
+
+
+```
+
+
+## 2. Compare different set of hypoxia genes
+
+```{r part2, fig.height=10, fig.width=12, message=FALSE}
+library(Seurat) 
+library(ggplot2) 
+library(dplyr)
+library(data.table)
+library(grid)
+library(RColorBrewer)
+library(ggpubr)
+
+DefaultAssay(integrated.obj) <- "RNA"
+
+#Scale all values from 0 to 1
+range01 <- function(x){(x-min(x))/(max(x)-min(x))}
+
+####1. Biocarta_HIF_Pathway ####
+Hypoxia_genes <- list(c("ARNT","ASPH","COPS5","CREB1","EDN1","EP300","EPO","HIF1A","HSP90AA1","JUN","LDHA","NOS3","P4HB","VEGFA","VHL"))
+
+#Get a score for the Hypoxia signature
+integrated.obj <- AddModuleScore(object = integrated.obj, features = Hypoxia_genes, name="Biocarta_HIF")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),Biocarta_HIF=range01(integrated.obj$Biocarta_HIF1))
+p_extra1 <- ggplot(aux_df, aes(x=clusters, y=Biocarta_HIF,fill=clusters)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8)) 
+#No difference between clusters
+
+####2. Harris_Hypoxia ####
+Hypoxia_genes <- list(c("ADM","AK3","ALDOA","ANGPT2","APEX1","BHLHE40","BIK","BNIP3","BNIP3L","CA12","CA9","CCL2","CCNG2","CD99","CDKN1A","CDKN1B","COL5A1","CP","CXCL8","DDIT3","EDN1","EDN2","ENO1","ENPEP","EPAS1","EPO","F3","FGF3","FLT1","FOS","FTL","GAPDH","HDAC9","HGF","HIF1A","HK1","HK2","HMOX1","IGF2","IGFBP1","IGFBP2","IGFBP3","IL6","JUN","L1CAM","LDHA","LRP8","MIF","MMP13","NFKB1","P4HA1","PDGFB","PFKL","PFKP","PGF","PGK1","PKM","PLAUR","PRPS1","PTGS2","RP1","SAT1","SLC2A1","SLC2A3","SPP1","STC1","TAGLN","TEK","TF","TFF3","TFRC","TGFA","TGFB1","TGFB3","TGM2","TH","TXN","VEGFA","VIM","XRCC5","XRCC6"))
+
+#Get a score for the Hypoxia signature
+integrated.obj <- AddModuleScore(object = integrated.obj, features = Hypoxia_genes, name="Harris_Hypoxia")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),Harris_Hypoxia=range01(integrated.obj$Harris_Hypoxia1))
+p_extra2 <- ggplot(aux_df, aes(x=clusters, y=Harris_Hypoxia,fill=clusters)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8)) 
+#Similar to our set
+
+####3. Semenza_HIF_Targets ####
+Hypoxia_genes <- list(c("ADM","ADRA1B","AK3","ALDOA","ALDOC","BNIP3","CA9","CDKN1A","CITED2","CP","EDN1","ENO1","EPO","FLT1","GAPDH","HK1","HK2","HMOX1","IGF2","IGFBP1","IGFBP2","IGFBP3","LDHA","NOS2","P4HA2","PFKL","PGK1","PKM","SERPINE1","SLC2A1","SLC2A3","TF","TFRC","TGFB3","TPI1","VEGFA"))
+
+#Get a score for the Hypoxia signature
+integrated.obj <- AddModuleScore(object = integrated.obj, features = Hypoxia_genes, name="Semenza_HIF_Targets")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),Semenza_HIF_Targets=range01(integrated.obj$Semenza_HIF_Targets1))
+p_extra3 <- ggplot(aux_df, aes(x=clusters, y=Semenza_HIF_Targets,fill=clusters)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8))
+#Different values
+
+#### 4. Winter_Hypoxia_up ####
+Hypoxia_genes <- list(c("ADORA2B","AK4","ALDOA","ANGPTL4","ANKRD37","ANKRD9","ANLN","B4GALT2","BCAR1","BMS1","BNIP3","C16orf74","CA12","CA9","CDCA4","CNIH4","COL4A5","CORO1C","CXCL8","DPM2","EEF1AKMT4","EIF2S1","GAPDH","GEMIN2","GMFB","GPN3","GSS","HAUS2","HES2","HILPDA","HOMER1","IGF2BP2","KCTD11","KRT17","LDHA","LDLR","METTL22","MIF","MNAT1","MRGBP","MRPL14","MRPS17","MTX1","NDRG1","NDUFA4L2","NME1","NTMT1","NUDT15","P4HA1","PAWR","PDZD11","PFKFB4","PGAM1","PGF","PGK1","PLAU","PLEKHG3","PPARD","PPP4R1","PSMA7","PSMB7","PSMD2","PTGFRN","PVR","PYGL","RAN","RHOC","RNF24","RNPS1","RUVBL2","S100A10","S100A3","SLC16A1","SLC2A1","SLC6A8","SLCO1B3","SLIRP","SNX24","TANC2","TEAD4","TFAP2C","TIMM23","TMEM189","TMEM30B","TMTC3","TNS4","TPBG","TPD52L2","TPI1","TRMT5","TUBB4B","VAPB","VEGFA","VEZT","XPO5"))
+
+#Get a score for the Hypoxia signature
+integrated.obj <- AddModuleScore(object = integrated.obj, features = Hypoxia_genes, name="Winter_Hypoxia_up")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),Winter_Hypoxia_up=range01(integrated.obj$Winter_Hypoxia_up1))
+p_extra4 <- ggplot(aux_df, aes(x=clusters, y=Winter_Hypoxia_up,fill=clusters)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8))  
+#Different values
+
+####5. Elvidge_Hypoxia_Up  ####
+Hypoxia_genes <- list(c("ADGRE2","ADM","ADORA2B","AHNAK2","AK4","AKAP12","ALDOC","ANG","ANGPTL4","ANKZF1","ARTN","ASPH","ATF3","ATG14","ATXN1","B3GNT4","BBX","BCOR","BHLHE40","BNIP3","BNIP3L","CA9","CADM1","CAV1","CAVIN1","CCN1","CCN5","CCNG2","CD59","CEMIP","CITED2","CSGALNACT1","CSRP2","CXCR4","CYB5A","CYP1B1","DAAM1","DDIT4","DDR1","DPYSL2","DPYSL4","DSC2","DST","DTNA","DUSP1","ECE1","EFNA3","EGFR","EGLN1","EGLN3","EGR1","ELF3","ENO2","ERO1A","FAM13A","FAM162A","FAM216A","FLNB","FOS","FYN","GADD45B","GBE1","GDF15","GJA1","GLRX","GPR87","GPRC5A","GYS1","HCFC1R1","HEY1","HILPDA","HK2","HLA-DRB1","IGFBP3","IGFBP5","ILVBL","INHA","INSIG2","ISG20","ITPR1","JUN","KDM3A","KDM4B","KLF6","KLF7","KLHL24","KRT15","KRT7","LIMCH1","LOX","LOXL1","LOXL2","MAFF","MET","MT-ND5","MXI1","NAP1L1","NDRG1","NFIL3","NOL3","NR3C1","NREP","OBSL1","OLFML2A","OPN3","ORAI3","P4HA1","P4HA2","PAM","PDGFB","PDGFRL","PDK1","PFKFB3","PFKP","PGAP1","PGK1","PGM1","PIM1","PLAC8","PLAUR","PLIN2","PPFIA4","PRKCA","PXDN","QSOX1","RASA4","RBCK1","RBPJ","RLF","RNASE4","RRAGD","S100A2","S100A4","S100A6","SAMD4A","SAT1","SCARB1","SCNN1B","SERPINE1","SFXN3","SH3GL3","SLC2A1","SLCO4A1","SORL1","SOX9","SPAG4","SPOCK1","SPRY1","SRD5A3","SRPX","STBD1","STC1","STC2","TBC1D3F","TGFBI","TIPARP","TMEFF1","TMEM265","TMEM45A","TNFAIP8","TXNIP","UPK1A","VEGFA","VEGFC","VLDLR","WSB1","YEATS2","YPEL1","ZMYND8","ZNF292","ZNF395","ZNF654"))
+
+#Get a score for the Hypoxia signature
+integrated.obj <- AddModuleScore(object = integrated.obj, features = Hypoxia_genes, name="Elvidge_Hypoxia_Up")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),Elvidge_Hypoxia_Up=range01(integrated.obj$Elvidge_Hypoxia_Up1))
+p_extra5 <- ggplot(aux_df, aes(x=clusters, y=Elvidge_Hypoxia_Up,fill=clusters)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8))  
+#Different values
+
+####6. Leonard_hypoxia  ####
+Hypoxia_genes <- list(c("ADORA2B","AK4","ALDOA","BHLHE40","BNIP3","CCNG2","CDKN1B","CDKN1C","DDIT4","DEPP1","DUSP1","EFNA1","F3","FOSL2","HNRNPA1","HOXA4","HOXA5","JMJD6","JUNB","KDM3A","MUC1","NFIL3","P4HA1","P4HA2","PDGFB","PFKFB4","PFKP","PGK1","PHC2","PLIN2","PPP1R3C","RASGRP1","SAP30","SERPINE1","SLC16A3","SLC2A1","SLC2A3","SLC7A5","STC2","TGFA","VEGFA"))
+
+#Get a score for the Hypoxia signature
+integrated.obj <- AddModuleScore(object = integrated.obj, features = Hypoxia_genes, name="Leonard_hypoxia")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),Leonard_hypoxia=range01(integrated.obj$Leonard_hypoxia1))
+p_extra6 <- ggplot(aux_df, aes(x=clusters, y=Leonard_hypoxia,fill=clusters)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8)) 
+#Similar to our set
+
+#Plot the actual expression of each of the hypoxia genes
+aux_df1 <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),Hypoxia_signature=range01(integrated.obj$Hypoxia_signature1))
+aux_df1$clusters <- factor(aux_df1$clusters,levels=c(0:13))
+Idents(integrated.obj) <- factor(Idents(integrated.obj),levels=c(0:13))
+p2 <- ggplot(aux_df1, aes(x=clusters, y=Hypoxia_signature,fill=clusters)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8))  
+
+```
+
+### 2.1. Combined all hypoxia values into one single plot
+
+```{r part2.1, fig.height=4, fig.width=12, message=FALSE}
+
+#Combined all hypoxia values into one single plot
+#Scale all values from 0 to 1
+range01 <- function(x){(x-min(x))/(max(x)-min(x))}
+aux_df <- data.frame(clusters=Idents(integrated.obj),predicted.cell_type=integrated.obj$prediction,Hypoxia_signature=range01(integrated.obj$Hypoxia_signature1),Harris_Hypoxia=range01(integrated.obj$Harris_Hypoxia1),Semenza_HIF_Targets=range01(integrated.obj$Semenza_HIF_Targets1),Winter_Hypoxia_up=range01(integrated.obj$Winter_Hypoxia_up1),Elvidge_Hypoxia_Up=range01(integrated.obj$Elvidge_Hypoxia_Up1),Leonard_hypoxia=range01(integrated.obj$Leonard_hypoxia1))
+melt_aux_df <- melt(aux_df)
+
+aux_df_cluster_median <- aux_df %>% group_by(clusters) %>% summarise(across(where(is.numeric), median))
+melt_aux_df_cluster_median <- melt(aux_df_cluster_median)
+ggplot(melt_aux_df_cluster_median,aes(x=clusters,y=value,color=variable,group = variable)) +
+  geom_point() + 
+  geom_line() + 
+  theme_classic()
+
+aux_df_predicted_median <- aux_df %>% group_by(predicted.cell_type) %>% summarise(across(where(is.numeric), median))
+melt_aux_df_predicted_median <- melt(aux_df_predicted_median)
+ggplot(melt_aux_df_predicted_median,aes(x=predicted.cell_type,y=value,color=variable,group = variable)) +
+  geom_point() + 
+  geom_line() + 
+  theme_classic()
+
+```
+
+```{r part2.2, fig.height=4, fig.width=6, message=FALSE}
+
+#Plot according to the LSC_label
+aux_df <- data.frame(LSC_label=integrated.obj$LSC_label,predicted.cell_type=integrated.obj$prediction,Hypoxia_signature=range01(integrated.obj$Hypoxia_signature1),Harris_Hypoxia=range01(integrated.obj$Harris_Hypoxia1),Semenza_HIF_Targets=range01(integrated.obj$Semenza_HIF_Targets1),Winter_Hypoxia_up=range01(integrated.obj$Winter_Hypoxia_up1),Elvidge_Hypoxia_Up=range01(integrated.obj$Elvidge_Hypoxia_Up1),Leonard_hypoxia=range01(integrated.obj$Leonard_hypoxia1))
+melt_aux_df <- melt(aux_df)
+ggplot(melt_aux_df,aes(x=LSC_label,y=value,fill = variable)) +
+  geom_boxplot() + 
+  theme_classic()
+
+aux_df_cluster_median <- aux_df %>% group_by(LSC_label) %>% summarise(across(where(is.numeric), median))
+melt_aux_df_cluster_median <- melt(aux_df_cluster_median)
+hypoxia_comp <- ggplot(melt_aux_df_cluster_median,aes(x=LSC_label,y=value,color=variable,group = variable)) +
+  geom_point(size = 3) + 
+  geom_line(size = 2) + 
+  theme_classic() +
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=14,face="bold"))
+hypoxia_comp
+
+```
+
+
+## 3. Trajectory
+
+```{r part3, fig.height=6, fig.width=8, message=FALSE}
+library(monocle3)
+library(Seurat)
+library(SeuratWrappers)
+library(ggplot2)
+library(patchwork)
+library(magrittr)
+library(ggbeeswarm)
+library(RColorBrewer)
+library("rasterpdf")
+
+#Get the trajectory on the calculated UMAP
+cds <- as.cell_data_set(integrated.obj)
+cds <- cluster_cells(cds)
+cds <- learn_graph(cds)
+cds <- order_cells(cds)
+
+plot_cells(cds, color_cells_by = "pseudotime", label_cell_groups = FALSE, label_leaves = T, label_branch_points = T)
+
+#Plot the values as a function of the pseudotime
+aux <- cds@colData
+aux_df <- data.frame(barcodes=rownames(aux),prediction=aux$prediction,celltype=aux$celltype,Pseudotime=cds@principal_graph_aux@listData$UMAP$pseudotime, LSC_label=aux$LSC_label)
+aux_df$prediction <- factor(aux_df$prediction,levels=rev(c("HSC","Prog","GMP","ProMono","Mono","cDC","pDC","earlyEry","lateEry","ProB","B","Plasma","T","CTL","NK")))
+getPalette = colorRampPalette(brewer.pal(12, "Paired"))
+colors = getPalette(15)
+names(colors) <- c("HSC","Prog","GMP","ProMono","Mono","cDC","pDC","earlyEry","lateEry","ProB","B","Plasma","T","CTL","NK")
+ggplot(aux_df[which(aux_df$prediction%in%names(which(table(aux_df$prediction)>50))),],aes(x=prediction,y=Pseudotime,col=prediction)) +
+  geom_quasirandom(alpha=.8) +
+  coord_flip() +
+  theme_classic() +
+  scale_color_manual(values=colors)
+
+colorsVelten <- readRDS(file="~/predictions_Velten_colorpalette.rds")
+colorsVelten2 <- colorsVelten[c("HSCs & MPPs","LMPPs","Myeloblasts","Myelocytes","Monocytes","Eosinophil-basophil-mast prog","Megakaryocyte","erythroid","dendritic cells","B cells","T cells","NK cells","blasts")]
+aux_df$celltype <- factor(aux_df$celltype,levels=rev(c("HSCs & MPPs","LMPPs","Myeloblasts","Myelocytes","Monocytes","Eosinophil-basophil-mast prog","Megakaryocyte","erythroid","dendritic cells","B cells","T cells","NK cells","blasts")))
+ggplot(aux_df[which(!is.na(aux_df$celltype)),],aes(x=celltype,y=Pseudotime,col=celltype)) +
+  geom_quasirandom(alpha=.8) +
+  coord_flip() +
+  theme_classic() +
+  scale_color_manual(values=colorsVelten)
+
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+cols = gg_color_hue(3)
+names(cols) <- levels(aux_df$LSC_label)
+aux_df$LSC_label <- factor(aux_df$LSC_label,levels=rev(levels(aux_df$LSC_label)))
+ggplot(aux_df,aes(x=LSC_label,y=Pseudotime,col=LSC_label)) +
+  geom_quasirandom(alpha=.8) +
+  coord_flip() +
+  theme_classic() +
+  scale_color_manual(values=cols)
+
+
+```
+
+## 4. Show the expression of the different signatures between the LSC 34, NonLSC 34 and 38+
+
+```{r part4, fig.height=4, fig.width=8, message=FALSE}
+library(Seurat) 
+library(ggplot2) 
+library(dplyr)
+library(data.table)
+library(grid)
+library(RColorBrewer)
+library(ggpubr)
+library(xlsx)
+library(UCell)
+
+DefaultAssay(integrated.obj) <- "RNA"
+
+#Scale all values from 0 to 1
+range01 <- function(x){(x-min(x))/(max(x)-min(x))}
+
+#### 0. Hypoxia ####
+Hypoxia_genes <- list(c("ABCB1","ABCG2","ADM","ADRA1B","AK4","ALDOA","ALDOC","ANGPT2","ANKRD37","ANXA1","BHLHE40","BHLHE41","BNIP3","BNIP3L","CA9","CAD","CALCRL","CAPG","CCNG2","CCR7","CD99","CDKN1A","CITED2","COL5A1","CP","CTGF","CTSD","CXCL12","CXCR4","CYP2S1","DDIT4","DEC1","EDN1","EGLN1","EGLN3","ENG","ENO1","EPO","ERO1A","ETS1","FAM162A","FECH","FN1","FURIN","GADD45B","GAPDH","GPI","GPX3","HK1","HK2","HMOX1","HSP90B1","ID2","IGF2","IGFBP1","IGFBP2","IGFBP3","ITGB2","JUNB","KDM3A","KDM4B","KITLG","KRT14","KRT18","KRT19","LDHA","LEP","LGALS1","LOX","LRP1","MCL1","MET","MMP14","MMP2","MMP9","MXI1","NAMPT","NOS2","NOS3","NPM1","NR4A1","NRN1","NT5E","P4HA1","P4HA2","P4HTM","PDGFA","PDK1","PFKFB3","PFKL","PGK1","PKM","PLAUR","PMAIP1","PPP5C","PROK1","RCOR2","S100A4","SENP1","SERPINE1","SLC2A1","SLC2A3","SOX9","STC2","TCF3","TERT","TF","TFF3","TFRC","TGFA","TGFB3","TGM2","TPI1","TWIST1","UCN2","VEGFA","VIM","ZEB1","ZEB2"))
+
+integrated.obj <- AddModuleScore(object = integrated.obj, features = Hypoxia_genes, name="hypoxia")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),hypoxia=range01(integrated.obj$hypoxia1),sample=integrated.obj$Sample_id,LSC_label=integrated.obj$LSC_label)
+ggplot(aux_df, aes(x=LSC_label, y=hypoxia,fill=LSC_label)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8)) 
+
+#### 1. glycolisis ####
+hallmark_glycolisis <- list(c("ABCB6","ADORA2B","AGL","AGRN","AK3","AK4","AKR1A1","ALDH7A1","ALDH9A1","ALDOA","ALDOB","ALG1","ANG","ANGPTL4","ANKZF1","ARPP19","ARTN","AURKA","B3GALT6","B3GAT1","B3GAT3","B3GNT3","B4GALT1","B4GALT2","B4GALT4","B4GALT7","BIK","BPNT1","CACNA1H","CAPN5","CASP6","CD44","CDK1","CENPA","CHPF","CHPF2","CHST1","CHST12","CHST2","CHST4","CHST6","CITED2","CLDN3","CLDN9","CLN6","COG2","COL5A1","COPB2","CTH","CXCR4","CYB5A","DCN","DDIT4","DEPDC1","DLD","DPYSL4","DSC2","ECD","EFNA3","EGFR","EGLN3","ELF3","ENO1","ENO2","ERO1A","EXT1","EXT2","FAM162A","FBP2","FKBP4","FUT8","G6PD","GAL3ST1","GALE","GALK1","GALK2","GAPDHS","GCLC","GFPT1","GLCE","GLRX","GMPPA","GMPPB","GNE","GNPDA1","GOT1","GOT2","GPC1","GPC3","GPC4","GPR87","GUSB","GYS1","GYS2","HAX1","HDLBP","HK2","HMMR","HOMER1","HS2ST1","HS6ST2","HSPA5","IDH1","IDUA","IER3","IGFBP3","IL13RA1","IRS2","ISG20","KDELR3","KIF20A","KIF2A","LCT","LDHA","LDHC","LHPP","LHX9","MDH1","MDH2","ME1","ME2","MED24","MERTK","MET","MIF","MIOX","MPI","MXI1","NANP","NASP","NDST3","NDUFV3","NOL3","NSDHL","NT5E","P4HA1","P4HA2","PAM","PAXIP1","PC","PDK3","PFKFB1","PFKP","PGAM1","PGAM2","PGK1","PGLS","PGM2","PHKA2","PKM","PKP2","PLOD1","PLOD2","PMM2","POLR3K","PPFIA4","PPIA","PPP2CB","PRPS1","PSMC4","PYGB","PYGL","QSOX1","RARS1","RBCK1","RPE","RRAGD","SAP30","SDC1","SDC2","SDC3","SDHC","SLC16A3","SLC25A10","SLC25A13","SLC35A3","SLC37A4","SOD1","SOX9","SPAG4","SRD5A3","STC1","STC2","STMN1","TALDO1","TFF3","TGFA","TGFBI","TKTL1","TPBG","TPI1","TPST1","TSTA3","TXN","UGP2","VCAN","VEGFA","VLDLR","XYLT2","ZNF292"))
+names(hallmark_glycolisis) <- "hallmark_glycolisis"
+
+integrated.obj <- AddModuleScore(object = integrated.obj, features = hallmark_glycolisis, name="hallmark_glycolisis")
+integrated.obj <- AddModuleScore_UCell(integrated.obj, features = hallmark_glycolisis)
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),hallmark_glycolisis=range01(integrated.obj$hallmark_glycolisis1),hallmark_glycolisis_UCell=range01(integrated.obj$hallmark_glycolisis_UCell),sample=integrated.obj$Sample_id,LSC_label=integrated.obj$LSC_label)
+ggplot(aux_df, aes(x=LSC_label, y=hallmark_glycolisis,fill=LSC_label)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8)) 
+
+#### 2. Ox phosphorilation ####
+hallmark_ox_phosphorylation <- list(c("ABCB7","ACAA1","ACAA2","ACADM","ACADSB","ACADVL","ACAT1","ACO2","AFG3L2","AIFM1","ALAS1","ALDH6A1","ATP1B1","ATP5F1A","ATP5F1B","ATP5F1C","ATP5F1D","ATP5F1E","ATP5MC1","ATP5MC2","ATP5MC3","ATP5ME","ATP5MF","ATP5MG","ATP5PB","ATP5PD","ATP5PF","ATP5PO","ATP6AP1","ATP6V0B","ATP6V0C","ATP6V0E1","ATP6V1C1","ATP6V1D","ATP6V1E1","ATP6V1F","ATP6V1G1","ATP6V1H","BAX","BCKDHA","BDH2","CASP7","COX10","COX11","COX15","COX17","COX4I1","COX5A","COX5B","COX6A1","COX6B1","COX6C","COX7A2","COX7A2L","COX7B","COX7C","COX8A","CPT1A","CS","CYB5A","CYB5R3","CYC1","CYCS","DECR1","DLAT","DLD","DLST","ECH1","ECHS1","ECI1","ETFA","ETFB","ETFDH","FDX1","FH","FXN","GLUD1","GOT2","GPI","GPX4","GRPEL1","HADHA","HADHB","HCCS","HSD17B10","HSPA9","HTRA2","IDH1","IDH2","IDH3A","IDH3B","IDH3G","IMMT","ISCA1","ISCU","LDHA","LDHB","LRPPRC","MAOB","MDH1","MDH2","MFN2","MGST3","MPC1","MRPL11","MRPL15","MRPL34","MRPL35","MRPS11","MRPS12","MRPS15","MRPS22","MRPS30","MTRF1","MTRR","MTX2","NDUFA1","NDUFA2","NDUFA3","NDUFA4","NDUFA5","NDUFA6","NDUFA7","NDUFA8","NDUFA9","NDUFAB1","NDUFB1","NDUFB2","NDUFB3","NDUFB4","NDUFB5","NDUFB6","NDUFB7","NDUFB8","NDUFC1","NDUFC2","NDUFS1","NDUFS2","NDUFS3","NDUFS4","NDUFS6","NDUFS7","NDUFS8","NDUFV1","NDUFV2","NNT","NQO2","OAT","OGDH","OPA1","OXA1L","PDHA1","PDHB","PDHX","PDK4","PDP1","PHB2","PHYH","PMPCA","POLR2F","POR","PRDX3","RETSAT","RHOT1","RHOT2","SDHA","SDHB","SDHC","SDHD","SLC25A11","SLC25A12","SLC25A20","SLC25A3","SLC25A4","SLC25A5","SLC25A6","SUCLA2","SUCLG1","SUPV3L1","SURF1","TCIRG1","TIMM10","TIMM13","TIMM17A","TIMM50","TIMM8B","TIMM9","TOMM22","TOMM70","UQCR10","UQCR11","UQCRB","UQCRC1","UQCRC2","UQCRFS1","UQCRH","UQCRQ","VDAC1","VDAC2","VDAC3"))
+
+integrated.obj <- AddModuleScore(object = integrated.obj, features = hallmark_ox_phosphorylation, name="hallmark_ox_phosphorylation")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),hallmark_ox_phosphorylation=range01(integrated.obj$hallmark_ox_phosphorylation1),sample=integrated.obj$Sample_id,LSC_label=integrated.obj$LSC_label)
+ggplot(aux_df, aes(x=LSC_label, y=hallmark_ox_phosphorylation,fill=LSC_label)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8)) 
+
+#### 3. lysosome ####
+lysosome <- list(c("TCIRG1","ATP6V0A2","ATP6V0A4","ATP6V0A1","ATP6V0D1","ATP6V1H","ATP6AP1","ATP6V0C","ATP6V0B","CTSA","CTSB","CTSC","CTSD","CTSE","CTSF","CTSG","CTSH","CTSK","CTSL","CTSO","CTSS","CTSV","CTSW","CTSZ","NAPSA","LGMA","TPP1","GLA","GLB1","GAA","GBA","IDUA","NAGA","NAGLU","GALC","GUSB","FUCA1","FUCA2","HEXA","HEXB","MANBA","MAN2B1","NEU1","HYAL2","HYAL1","SPAM1","HYAL4","HYAL3","ARSA","ARSB","ARSG","GALNS","GNS","IDS","SGSH","LIPA","PLA2G15","DNASE2B","DNASE2","ACP2","ACO5","SMPD1","ASAH1","AGA","PSAP","PSAPL1","GM2A","PPT1","PPT2","LAMP1","LAMP2","LAMP3","CD68","CD63","SCARB2","NPC1","NPC2","CTNS","SLC17A5","SLC11A1","SLC11A2","LAPTM4B","LAPTM5","LAPTM4A","ABCA2","ABCB9","CD164","ENTPD4","SORT1","CLN3","CLN5","MFSD8","HGSNAT","SUMF1","GNPTAB","GNPTG","NAGPA","IGF2R","M6PR","CLT1","CLTB","CLTC","CLTCL1","AP1G1","AP1G2","AP1B1","AP1M1","AP1M2","AP1S1","AP1S2","AP1S3","AP3D1","AP3B2","AP3B1","AP3M1","AP3M2","AP3S2","AP3S1","AP4E1","AP4B1","AP4M1","AP4S1","GGA2","GGA3","GGA1","MCOLN1","LITAF"))
+
+integrated.obj <- AddModuleScore(object = integrated.obj, features = lysosome, name="lysosome")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),lysosome=range01(integrated.obj$lysosome1),sample=integrated.obj$Sample_id,LSC_label=integrated.obj$LSC_label)
+ggplot(aux_df, aes(x=LSC_label, y=lysosome,fill=LSC_label)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8))
+
+#### 4. ER_stress ####
+ER_stress <- list(c("EIF2AK3","DERL2","SELENOS","PARP16","BFAR","ATF6","TMEM33","NCK1","PTPN1","WFS1","COPS5","ATF6B","BAX","PIGBOS1","AGR2","ERN1","CDK5RAP3","AMFR","VAPB","XBP1","PIK3R1","BAK1","TBL2","YOD1","FICD","DERL3","DERL1","CREB3","NUPR1","SESN2","SCAMP5","PRKN","OS9","EIF2AK3","GORASP2","UBA5","EIF2B5","RASGRF2","EIF2S1","TRIB3","DDIT3","DNAJC10","ATF4","TMEM33","ERP44","TNFRSF10B","MANF","USP19","TMTC3","HYOU1","PTPN1","UFL1","UFM1","WFS1","CFTR","ATP2A1","BCL2L11","ERN1","CXCL8","CREB3L2","VAPB","UFC1","FLOT1","RNF183","PPP1R15A","TMX1","P4HB","FICD","UBQLN1","RASGRF1","SEC16A","MAP3K5","CEBPB"))
+
+integrated.obj <- AddModuleScore(object = integrated.obj, features = ER_stress, name="ER_stress")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),ER_stress=range01(integrated.obj$ER_stress1),sample=integrated.obj$Sample_id,LSC_label=integrated.obj$LSC_label)
+ggplot(aux_df, aes(x=LSC_label, y=ER_stress,fill=LSC_label)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8))  
+
+####5. Negative_G0_to_G1  ####
+Negative_G0_to_G1 <- list(c("RBBP7","DAB2IP","MGA","YAF2","RYBP","PHC3","L3MBTL2","EHMT2","RNF2","RBBP8","PCGF6","EPC1","EHMT1","UXT","DUX4","PPP2R5B","CDC7","APAF1","CHEK1","E2F6","EED","HLA-G","RRM2","BMI1","PCGF2","BRCA1","CBX5","MAX","PHC1","FOXO4","E2F1","RING1","RAD51","RBBP4","CBX3","TFDP1","TFDP2","SUZ12","PPP2R5B","EZH2"))
+
+integrated.obj <- AddModuleScore(object = integrated.obj, features = Negative_G0_to_G1, name="Negative_G0_to_G1")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),Negative_G0_to_G1=range01(integrated.obj$Negative_G0_to_G11),sample=integrated.obj$Sample_id,LSC_label=integrated.obj$LSC_label)
+ggplot(aux_df, aes(x=LSC_label, y=Negative_G0_to_G1,fill=LSC_label)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8))  
+
+#### 6. Translation Initiation ####
+translation <- list(c("ABCE1","AGO2","ALKBH1","ATF4","BANK1","BOLL","C8orf88","CCL5","CDC123","COPS5","CTIF","DAZ1","DAZ2","DAZ3","DAZ4","DAZL","DDX1","DDX3X","DENR","DHX29","DHX33","DNAJC3","EIF1","EIF1AD","EIF1AX","EIF1AY","EIF1B","EIF2A","EIF2AK1","EIF2AK2","EIF2AK3","EIF2AK4","EIF2B1","EIF2B2","EIF2B3","EIF2B4","EIF2B5","EIF2D","EIF2S1","EIF2S2","EIF2S3","EIF2S3B","EIF3A","EIF3B","EIF3C","EIF3CL","EIF3D","EIF3E","EIF3F","EIF3G","EIF3H","EIF3I","EIF3J","EIF3K","EIF3L","EIF3M","EIF4A1","EIF4A2","EIF4B","EIF4E","EIF4E1B","EIF4E2","EIF4E3","EIF4EBP1","EIF4EBP2","EIF4EBP3","EIF4G1","EIF4G2","EIF4G3","EIF4H","EIF5","EIF5B","EIF6","FMR1","GLE1","HABP4","HSPB1","IMPACT","KHDRBS1","KLHL25","LARP1","LTO1","MCTS1","METTL3","MIF4GD","MTFMT","MTIF2","MTIF3","MTOR","NCBP1","NCBP2","NCK1","NCK2","NPM1","PABPC1","PAIP1","PAIP2","PAIP2B","POLR2D","POLR2G","PPP1CA","PPP1R15A","PPP1R15B","RBM4","RPL10","RPL10A","RPL11","RPL12","RPL13","RPL13A","RPL14","RPL15","RPL17","RPL18","RPL18A","RPL19","RPL21","RPL22","RPL23","RPL23A","RPL24","RPL26","RPL27","RPL27A","RPL28","RPL29","RPL3","RPL30","RPL31","RPL32","RPL34","RPL35","RPL35A","RPL36","RPL36A","RPL37","RPL37A","RPL38","RPL39","RPL4","RPL41","RPL5","RPL6","RPL7","RPL7A","RPL8","RPL9","RPLP0","RPLP1","RPLP2","RPS10","RPS11","RPS12","RPS13","RPS14","RPS15","RPS15A","RPS16","RPS17","RPS18","RPS19","RPS2","RPS20","RPS21","RPS23","RPS24","RPS25","RPS26","RPS27","RPS27A","RPS28","RPS29","RPS3","RPS3A","RPS4X","RPS4Y1","RPS5","RPS6","RPS6KB1","RPS6KB2","RPS7","RPS8","RPS9","RPSA","RXRA","TNF","TPR","UBA52","UHMK1","YTHDF1","YTHDF2","YTHDF3"))
+
+integrated.obj <- AddModuleScore(object = integrated.obj, features = translation, name="translation")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),translation=range01(integrated.obj$translation1),sample=integrated.obj$Sample_id,LSC_label=integrated.obj$LSC_label)
+ggplot(aux_df, aes(x=LSC_label, y=translation,fill=LSC_label)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8)) 
+
+#### 7. G0_Fukushima ####
+go_genes <- c("APAF1","BMI1","BRCA1","CBX3","CBX5","CDC7","CHEK1","DAB2IP","DUX4","E2F1","E2F6","EED","EHMT1","EHMT2","EPC1","EZH2","FOXO4","HLA-G","L3MBTL2","MAX","MGA","PCGF2","PCGF6","PHC1","PHC3","PPP2R5B","PPP2R5B","RAD51","RBBP4","RBBP7","RBBP8","RING1","RNF2","RRM2","RYBP","SUZ12","TFDP1","TFDP2","UXT","YAF2")
+
+#Get a score for the Hypoxia signature
+integrated.obj <- AddModuleScore(object = integrated.obj, features = list(g0_genes$genes), name="G0_dormant_Fukushima")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),G0_dormant_Fukushima=range01(integrated.obj$G0_dormant_Fukushima1),sample=integrated.obj$Sample_id,LSC_label=integrated.obj$LSC_label)
+ggplot(aux_df, aes(x=LSC_label, y=G0_dormant_Fukushima,fill=LSC_label)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8)) 
+
+#### 8.  ROS (GO_REACTIVE_OXYGEN_SPECIES_METABOLIC_PROCESS) ####
+GO_REACTIVE_OXYGEN_SPECIES_METABOLIC_PROCESS <- list(c("AATF","ABCD1","ABCD2","ACE2","ACOD1","ACP5","ADGRB1","AGT","AGTR1","AGTR2","AGXT2","AIF1","AKR1C3","AKT1","ALOX12","ALOX5","APOA4","ARF4","ARG2","ASS1","ATG5","ATP2B4","ATP5IF1","ATP7A","BCL2","BCO2","BCR","BIRC2","BMP7","BNIP3","BRCA1","BST1","CAT","CAV1","CCN1","CCN2","CCN6","CCS","CD177","CD34","CD36","CD47","CDKN1A","CFLAR","CLEC7A","CLU","COA8","COQ7","CPS1","CRP","CRYAB","CTNS","CX3CR1","CYB5R4","CYBA","CYBB","CYP1A1","CYP1A2","CYP1B1","DDAH1","DDAH2","DDIT4","DHFR","DHFRP1","DNM2","DRD5","DUOX1","DUOX2","DUOXA1","DUOXA2","EDN1","EGFR","EIF6","EPX","F2","F2RL1","FANCC","FBLN5","FOXM1","FOXO1","FOXO3","FPR2","FYN","G6PD","GADD45A","GBF1","GCH1","GCHFR","GLA","GLS2","GNAI2","GNAI3","GPX1","GPX3","GRB2","GRIN1","GSTP1","HBA1","HBA2","HBB","HBD","HBE1","HBG1","HBG2","HBM","HBQ1","HBZ","HDAC4","HDAC6","HIF1A","HK2","HP","HSP90AA1","HSP90AB1","HSPD1","ICAM1","IFI6","IFNG","IL10","IL1B","IMMP2L","INAVA","INS","INSR","ITGAM","ITGB2","JAK2","KHSRP","KLF2","KLF4","KLRC4-KLRK1","KLRK1","LEP","LPO","LRRK2","MAOB","MAPK14","MAPT","MIR132","MIR181A1","MIR181A2","MIR181B1","MIR181B2","MIR199A1","MIR199A2","MIR21","MIR212","MIR24-1","MIR24-2","MIR27B","MIR590","MIR92A1","MIR92A2","MIR99B","MMP3","MMP8","MPO","MPV17","MPV17L","MT-CO2","MT-ND2","MT3","MTCO2P12","MTOR","NCF1","NCF1B","NCF1C","NCF2","NCF4","NDUFA13","NDUFAF2","NDUFS1","NDUFS3","NDUFS4","NFE2L2","NNT","NOS1","NOS1AP","NOS2","NOS3","NOX1","NOX3","NOX4","NOX5","NOXA1","NOXO1","NQO1","NQO2","NRROS","P2RX4","P2RX7","PAGE4","PARK7","PARL","PAX2","PDGFB","PDGFRB","PDK3","PDK4","PID1","PINK1","PKD2","PLA2R1","PLIN5","PMAIP1","PON3","POR","PRCP","PRDX1","PRDX2","PRDX3","PRDX4","PRDX5","PRDX6","PREX1","PRG3","PRKCD","PRKN","PTGIS","PTGS2","PTK2B","PTX3","PXDN","PXDNL","RAB27A","RAC1","RAC2","RFK","RGN","RHOA","RIPK1","RIPK3","RNF41","ROCK2","ROMO1","RORA","SELENOS","SESN1","SESN2","SFTPD","SH3PXD2A","SH3PXD2B","SIRPA","SIRT2","SIRT3","SIRT5","SLC18A2","SLC25A33","SLC30A10","SLC5A3","SLC7A2","SMAD3","SNCA","SOD1","SOD2","SOD3","SPHK2","SPR","STAT3","STK17A","SYK","SZT2","TAFA4","TFAP2A","TGFB1","TGFBR2","THBS1","TICAM1","TIGAR","TLR2","TLR4","TLR6","TMEM106A","TNF","TP53","TPO","TRAP1","TRPV1","TSPO","TUSC2","TYROBP","UCP1","VAV1","VDAC1","WDR35","XDH","ZC3H12A","ZNF205"))
+
+integrated.obj <- AddModuleScore(object = integrated.obj, features = GO_REACTIVE_OXYGEN_SPECIES_METABOLIC_PROCESS, name="GO_REACTIVE_OXYGEN_SPECIES_METABOLIC_PROCESS")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),GO_REACTIVE_OXYGEN_SPECIES_METABOLIC_PROCESS=range01(integrated.obj$GO_REACTIVE_OXYGEN_SPECIES_METABOLIC_PROCESS1),sample=integrated.obj$Sample_id,LSC_label=integrated.obj$LSC_label)
+ggplot(aux_df, aes(x=LSC_label, y=GO_REACTIVE_OXYGEN_SPECIES_METABOLIC_PROCESS,fill=LSC_label)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8)) 
+
+#### 9. Try with other LSC signatures: Gentles up regulated genes on LSC samples ####
+Gentles <- list(c("EFCC1","FCMR","GIMAP2","GIMAP7","LGALSL","LOC727893","MMRN1","SLC38A1","VNN1","BIRC3","CD34","EBF3","EVI2A","GIMAP6","GUCY1A1","HOPX","ICAM1","PCDHGC3","GSAP","RBPMS","SETBP1","SH3BP5","ABCC2","FBXO21","HECA","HLF","LOC100128550","LTB","MEF2C","SLC37A3","TMEM200A"))
+names(Gentles) <- "Gentles"
+
+integrated.obj <- AddModuleScore(object = integrated.obj, features = Gentles, name="Gentles")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),Gentles=range01(integrated.obj$Gentles1),sample=integrated.obj$Sample_id,LSC_label=integrated.obj$LSC_label)
+
+ggplot(aux_df, aes(x=LSC_label, y=Gentles,fill=LSC_label)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8)) 
+
+#### 10. Try with other LSC signatures: Eppert up regulated genes on LSC samples ####
+Eppert <- list(c("NIPAL2","RBPMS","TRAF3IP2","PPP1R10","ATP1B1","NF1","RBPMS","KLF3-AS1","RBPMS","ABCG1","CLN5","LRRC8B","FRMD4B","ZFP30","SNHG20","CDIP1","TGIF2","RABGAP1","PPIG","ADGRG1","EIF2S3","NAB1","LRRC61","ATP1B1","ZNF500","CSDE1","C2CD2","PAQR6","EEF1AKMT3","ARPP19","SETDB1","ZBTB39","RBPMS","SLC9A7","MAP3K7","ARL3","ZNF304","LOC552889","VGLL4","UBR5","PTCD2","CDK12","IQGAP2","PLCH1","ARFGEF1","MAP3K7","PNPLA4"))
+names(Eppert) <- "Eppert"
+
+integrated.obj <- AddModuleScore(object = integrated.obj, features = Eppert, name="Eppert")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),Eppert=range01(integrated.obj$Eppert1),sample=integrated.obj$Sample_id,LSC_label=integrated.obj$LSC_label)
+
+ggplot(aux_df, aes(x=LSC_label, y=Eppert,fill=LSC_label)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8)) 
+
+#### 11. Try with other LSC signatures: Ishikawa up regulated genes on LSC samples ####
+Ishikawa <- list(c("WT1","SUCNR1","PDE9A","HCK","AK5","DOK2","LRG1","BIK","CTSC","FCGR2A","ITGB2","CD93","ADGRE5","CD33","IL2RG","LY86","TNFRSF4","TNFSF13B","IL2RA","IL7R","CD1C","CD86","CD24","CEACAM6","CD180"))
+names(Ishikawa) <- "Ishikawa"
+
+integrated.obj <- AddModuleScore(object = integrated.obj, features = Ishikawa, name="Ishikawa")
+aux_df <- data.frame(umap1=integrated.obj$umap1,umap2=integrated.obj$umap2,clusters=Idents(integrated.obj),Ishikawa=range01(integrated.obj$Ishikawa1),sample=integrated.obj$Sample_id,LSC_label=integrated.obj$LSC_label)
+
+ggplot(aux_df, aes(x=LSC_label, y=Ishikawa,fill=LSC_label)) + geom_boxplot(outlier.shape = NA) + theme_classic() + 
+  theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=10), axis.title.x=element_blank(), legend.position = "none",plot.margin = margin(0, 5.2, 0, 1.75, "cm"),axis.title.y = element_text(size = 8)) 
+
+
+```
+
+### 5. Show the expression of the other LSC markers between the LSC 34, NonLSC 34 and 38+
+
+```{r part4, fig.height=4, fig.width=6, message=FALSE}
+library(Seurat) 
+library(ggplot2) 
+library(dplyr)
+library(data.table)
+library(grid)
+library(RColorBrewer)
+library(ggpubr)
+library(xlsx)
+
+DefaultAssay(integrated.obj) <- "RNA"
+
+Other_LSC_markers <- c("CD93","MIR126","IL3RA","HAVCR2","CD96","CLEC12A","IL2RA","FCGR2A","CD47","HLF","CD33","CD52","CD82","CD99","IL1RAP","CD36","ADGRG1","BCL2","CD200","KLRK1")
+
+integrated.obj.COPY <- integrated.obj
+Idents(integrated.obj.COPY) <- integrated.obj$LSC_label
+DotPlot(integrated.obj.COPY, features = Other_LSC_markers) + scale_colour_gradient2(low = "blue", mid = "white", high = "red") + coord_flip() +
+    theme(axis.text.x = element_text(size=10),axis.text.y = element_text(size=9)) + ylab("Cluster")
+
+```
+
+```{r part5.1, fig.height=12, fig.width=8, message=FALSE}
+VlnPlot(integrated.obj.COPY, features = Other_LSC_markers, pt.size = 0)
+```
+
+
+## 6. Check the markers between the LSC groups
+
+```{r part6, fig.height=10, fig.width=12, message=FALSE}
+library(Seurat) 
+library(ggplot2) 
+library(dplyr)
+library(data.table)
+library(grid)
+library(RColorBrewer)
+library(ggpubr)
+library(xlsx)
+library(MAST) 
+library(metap) 
+library(knitr) 
+
+DefaultAssay(integrated.obj) <- "RNA"
+
+#Get the markers bw the 3 groups
+markers.bw.groups <- FindAllMarkers(integrated.obj.COPY, only.pos = TRUE, logfc.threshold = 0.25)
+
+top20 <- markers.bw.groups %>% group_by(cluster) %>% top_n(n = 20, wt = avg_log2FC)
+DoHeatmap(integrated.obj.COPY, features=top20$gene, group.by='LSC_label') + scale_fill_gradient2(low="blue",mid="white",high="red") 
+
+#Get the genes DE between the LSC 34+ and NonLSC 34+
+markers.bw.groups2 <- FindMarkers(integrated.obj.COPY, ident.1 = "LSC 34+", ident.2 = "NonLSC 34+", logfc.threshold = 0.25)
+colnames(markers.bw.groups2)[3:4] <- c("pct.LSC34+","pct.NonLSC34+") 
+markers.bw.groups2$cluster <- unlist(lapply(markers.bw.groups2$avg_log2FC,function(x)ifelse(x>0,"LSC 34+","NonLSC 34+")))
+markers.bw.groups2$gene <- rownames(markers.bw.groups2)
+markers.bw.groups2$avg_log2FC2 <- abs(markers.bw.groups2$avg_log2FC)
+top24 <- markers.bw.groups2 %>% group_by(cluster) %>% top_n(n = 24, wt = avg_log2FC2)
+top24 <- top24[order(top24$cluster,-top24$avg_log2FC2),]
+DoHeatmap(integrated.obj.COPY, features=top24$gene, group.by='LSC_label') + scale_fill_gradient2(low="blue",mid="white",high="red") 
+
+#Any gene from the hypoxia family involved?
+Hypoxia_genes <- list(c("ABCB1","ABCG2","ADM","ADRA1B","AK4","ALDOA","ALDOC","ANGPT2","ANKRD37","ANXA1","BHLHE40","BHLHE41","BNIP3","BNIP3L","CA9","CAD","CALCRL","CAPG","CCNG2","CCR7","CD99","CDKN1A","CITED2","COL5A1","CP","CTGF","CTSD","CXCL12","CXCR4","CYP2S1","DDIT4","DEC1","EDN1","EGLN1","EGLN3","ENG","ENO1","EPO","ERO1A","ETS1","FAM162A","FECH","FN1","FURIN","GADD45B","GAPDH","GPI","GPX3","HK1","HK2","HMOX1","HSP90B1","ID2","IGF2","IGFBP1","IGFBP2","IGFBP3","ITGB2","JUNB","KDM3A","KDM4B","KITLG","KRT14","KRT18","KRT19","LDHA","LEP","LGALS1","LOX","LRP1","MCL1","MET","MMP14","MMP2","MMP9","MXI1","NAMPT","NOS2","NOS3","NPM1","NR4A1","NRN1","NT5E","P4HA1","P4HA2","P4HTM","PDGFA","PDK1","PFKFB3","PFKL","PGK1","PKM","PLAUR","PMAIP1","PPP5C","PROK1","RCOR2","S100A4","SENP1","SERPINE1","SLC2A1","SLC2A3","SOX9","STC2","TCF3","TERT","TF","TFF3","TFRC","TGFA","TGFB3","TGM2","TPI1","TWIST1","UCN2","VEGFA","VIM","ZEB1","ZEB2"))
+
+markers.bw.groups[which(markers.bw.groups$gene%in%unlist(Hypoxia_genes)),]
+markers.bw.groups2[which(markers.bw.groups2$gene%in%unlist(Hypoxia_genes)),]
+
+```
+
+```{r part6.1, fig.height=4, fig.width=20, message=FALSE}
+
+#### Plot the expression of all hypoxia genes on each of the 3 groups
+DotPlot(integrated.obj.COPY, features = unlist(Hypoxia_genes)) + scale_colour_gradient2(low = "blue", mid = "#f2f2f2", high = "red") +
+    theme(axis.text.x = element_text(size=10, angle = 90, vjust = 0.5, hjust=1),axis.text.y = element_text(size=14)) + ylab ("") +
+  theme(plot.margin=unit(c(4,1,1.5,1.2),"cm"))
+```
+
+
+```{r part6.2, fig.height=16, fig.width=20, message=FALSE}
+#### Plot expression of genes DE betwen LSC and NonLSC 34+ (top24)
+
+#Take the genes expressed in LSC34+ and plot VlnPlots
+VlnPlot(integrated.obj.COPY,top24$gene[which(top24$cluster=="LSC 34+")], pt.size = 0.1, ncol=6)
+
+#Take the genes expressed in NonLSC34+ and plot VlnPlots
+VlnPlot(integrated.obj.COPY,top24$gene[which(top24$cluster=="NonLSC 34+")], pt.size = 0.1, ncol=6)
+
+```
+
+```{r part6.3, fig.height=6, fig.width=8, message=FALSE}
+library(ggrepel) 
+library(dplyr) 
+
+#### Create an MA_plot
+
+# Get all genes changing between LSC34 and NonLSC34+
+all_markers_LSC_vs_NonLSC <- FindMarkers(integrated.obj.COPY, ident.1 = "LSC 34+", ident.2 = "NonLSC 34+", logfc.threshold = 0)
+
+colnames(all_markers_LSC_vs_NonLSC)[3:4] <- c("pct.LSC34+","pct.NonLSC34+") 
+all_markers_LSC_vs_NonLSC$cluster <- unlist(lapply(all_markers_LSC_vs_NonLSC$avg_log2FC,function(x)ifelse(x>0,"LSC 34+","NonLSC 34+")))
+all_markers_LSC_vs_NonLSC$gene <- rownames(all_markers_LSC_vs_NonLSC)
+# all_markers_LSC_vs_NonLSC$avg_log2FC2 <- abs(all_markers_LSC_vs_NonLSC$avg_log2FC)
+
+all_markers_LSC_vs_NonLSC$log2FC <- all_markers_LSC_vs_NonLSC$avg_log2FC
+all_markers_LSC_vs_NonLSC$p_val_adj_f <- all_markers_LSC_vs_NonLSC$p_val_adj
+all_markers_LSC_vs_NonLSC$p_val_adj_f[which(all_markers_LSC_vs_NonLSC$p_val_adj==0)] <- min(all_markers_LSC_vs_NonLSC$p_val_adj[which(all_markers_LSC_vs_NonLSC$p_val_adj!=0)])
+all_markers_LSC_vs_NonLSC$log10p_val <- -1*log10(all_markers_LSC_vs_NonLSC$p_val_adj_f)
+all_markers_LSC_vs_NonLSC$gene2 <- all_markers_LSC_vs_NonLSC$gene
+all_markers_LSC_vs_NonLSC$gene2[which((all_markers_LSC_vs_NonLSC$log2FC>-0.5 & all_markers_LSC_vs_NonLSC$log2FC<0.25) | all_markers_LSC_vs_NonLSC$p_val_adj>0.05)] <- ""
+highlight_df <- all_markers_LSC_vs_NonLSC %>% 
+             filter(p_val_adj<0.05 & abs(avg_log2FC) >= 0.25)
+plot <- ggplot(all_markers_LSC_vs_NonLSC,aes(x=log2FC,y=log10p_val, label=gene2)) +
+  geom_point(alpha=0.6) +
+  geom_point(data=highlight_df, 
+             aes(x=log2FC,y=log10p_val), 
+             color='red',
+             size=2) +
+  geom_vline(xintercept = -0.25, linetype="dashed") +
+  geom_vline(xintercept = 0.25, linetype="dashed") +
+  ylab("-log10(pval.adj)") +
+  xlab("log2FC(LSC 34+ vs NonLSC 34+)") +
+  geom_text_repel( xlim = c(-Inf, Inf), ylim = c(-Inf, Inf)) +
+  theme_classic() 
+plot(plot)
+
+#Count the number of genes on the vulcano
+count_df <- as.data.frame(highlight_df %>%
+  group_by(cluster) %>%
+  tally())
+count_bar_plot <- ggplot(count_df,aes(x=cluster,y=n)) +
+  geom_bar(aes(fill=cluster),stat="identity") +
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  theme(axis.title.x=element_blank(),
+          axis.text.x=element_blank(),
+          axis.ticks.x=element_blank())
+plot(count_bar_plot)
+
+```
+
+
+## 7. clusterProfiler
+
+```{r part17, fig.height=3, fig.width=5, message=FALSE}
+library(ReactomePA)
+library(forcats)
+library(ggplot2)
+library(ggstance)
+library(enrichplot)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(dplyr)
+
+####1. Do a GSEA analysis
+
+##1.1. LSC34+ vs NonLSC34+
+markers <- markers.bw.groups2
+
+#Convert gene names into entrezid
+eg = bitr(markers$gene, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+markers <- merge(markers,eg,by.x="gene",by.y="SYMBOL")
+
+#Sort the gene list
+# markers$avg_log2FC_aux <- markers$avg_log2FC
+# markers$avg_log2FC_aux[which(markers$cluster=="LSC 34+")] <- -markers$avg_log2FC_aux[which(markers$cluster=="LSC 34+")]
+markers <- markers[order(-markers$avg_log2FC),]
+genes <- markers$avg_log2FC
+names(genes) <- markers$ENTREZID
+
+y <- gsePathway(genes, 
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH", 
+                minGSSize = 10,
+                verbose = FALSE)
+
+result <- y@result
+# No significance for the LSC 34+
+
+# result$Class <- sign(result$NES)
+
+# gseGO <- gseGO(geneList     = genes,
+#               OrgDb        = org.Hs.eg.db,
+#               ont          = "ALL",
+#               minGSSize    = 10,
+#               maxGSSize    = 500,
+#               pvalueCutoff = 0.05,
+#               verbose      = FALSE)
+#Error
+
+kk2 <- gseKEGG(geneList     = genes,
+               organism     = 'hsa',
+               minGSSize    = 10,
+               pvalueCutoff = 0.05,
+               verbose      = FALSE)
+
+# #Get the 10 terms with more NES and plot
+# y_short <- result %>%
+#   group_by(Class) %>%
+#   arrange(desc(abs(NES))) %>%
+#   slice_head(n=10)
+# 
+# ggplot(y_short, aes(NES, fct_reorder(Description, NES), fill=qvalues), showCategory=10) + 
+#     geom_col(orientation='y') + 
+#     scale_fill_continuous(low='red', high='blue', guide=guide_colorbar(reverse=TRUE)) + 
+#     theme_minimal() + xlab("NES (LSC 34+ vs NonLSC 34+)") + ylab(NULL) + theme(text = element_text(size = 14))  +
+#     scale_y_discrete(label = function(x) stringr::str_trunc(x, 70))
+
+#No term significant
+
+##1.2. LSC34+ vs 38+
+markers <- markers.bw.groups
+markers_f <- markers[which(markers$cluster=="LSC 34+" | markers$cluster=="NonLSC 38+"),]
+
+#Convert gene names into entrezid
+eg = bitr(markers_f$gene, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+markers_f <- merge(markers_f,eg,by.x="gene",by.y="SYMBOL")
+
+#Sort the gene list
+markers_f$avg_log2FC_aux <- markers_f$avg_log2FC
+markers_f$avg_log2FC_aux[which(markers_f$cluster=="NonLSC 38+")] <- -markers_f$avg_log2FC_aux[which(markers_f$cluster=="NonLSC 38+")]
+markers_f <- markers_f[order(-markers_f$avg_log2FC_aux),]
+genes <- markers_f$avg_log2FC_aux
+names(genes) <- markers_f$ENTREZID
+
+y <- gsePathway(genes, 
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH", 
+                minGSSize = 20,
+                verbose = FALSE)
+result_LSC34 <- y@result
+result_LSC34$Class <- sign(result_LSC34$NES)
+
+#Get the 10 terms with more NES and plot
+y_short <- result_LSC34 %>%
+  group_by(Class) %>%
+  arrange(desc(abs(NES))) %>%
+  slice_head(n=10)
+
+plot1 <- ggplot(y_short, aes(NES, fct_reorder(Description, NES), fill=qvalues), showCategory=10) +
+    geom_col(orientation='y') +
+    scale_fill_continuous(low='red', high='blue', guide=guide_colorbar(reverse=TRUE)) +
+    theme_minimal() + xlab("NES (LSC 34+ vs 38+)") + ylab(NULL) + theme(text = element_text(size = 14))  +
+    scale_y_discrete(label = function(x) stringr::str_trunc(x, 70))
+
+##1.3. NonLSC34+ vs 38+
+markers <- markers.bw.groups
+markers_f <- markers[which(markers$cluster=="NonLSC 34+" | markers$cluster=="NonLSC 38+"),]
+
+#Convert gene names into entrezid
+eg = bitr(markers_f$gene, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+markers_f <- merge(markers_f,eg,by.x="gene",by.y="SYMBOL")
+
+#Sort the gene list
+markers_f$avg_log2FC_aux <- markers_f$avg_log2FC
+markers_f$avg_log2FC_aux[which(markers_f$cluster=="NonLSC 38+")] <- -markers_f$avg_log2FC_aux[which(markers_f$cluster=="NonLSC 38+")]
+markers_f <- markers_f[order(-markers_f$avg_log2FC_aux),]
+genes <- markers_f$avg_log2FC_aux
+names(genes) <- markers_f$ENTREZID
+
+y <- gsePathway(genes, 
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH", 
+                minGSSize = 20,
+                verbose = FALSE)
+result_NonLSC34 <- y@result
+result_NonLSC34$Class <- sign(result_NonLSC34$NES)
+
+#Get the 10 terms with more NES and plot
+y_short <- result_NonLSC34 %>%
+  group_by(Class) %>%
+  arrange(desc(abs(NES))) %>%
+  slice_head(n=10)
+
+plot2 <- ggplot(y_short, aes(NES, fct_reorder(Description, NES), fill=qvalues), showCategory=10) +
+    geom_col(orientation='y') +
+    scale_fill_continuous(low='red', high='blue', guide=guide_colorbar(reverse=TRUE)) +
+    theme_minimal() + xlab("NES (NonLSC 34+ vs 38+)") + ylab(NULL) + theme(text = element_text(size = 14))  +
+    scale_y_discrete(label = function(x) stringr::str_trunc(x, 70))
+
+#Get the terms enriched in NonLSC34 that are not enriched in 34 (from the previous comparison)
+result_merge <- merge(result_LSC34,result_NonLSC34,by="ID",all=T)
+result_merge2 <- result_merge[which((is.na(result_merge$Description.x) & result_merge$Class==1) | (result_merge$Class==-1)),]
+result_merge2 <- result_merge[which((is.na(result_merge$Description.x) & result_merge$Class.y==1) | (result_merge$Class.y==-1)),]
+
+#Get the 10 terms with more NES and plot
+y_short <- result_merge2 %>%
+  group_by(Class.y) %>%
+  arrange(desc(abs(NES.y))) %>%
+  slice_head(n=10)
+
+plot3 <- ggplot(y_short, aes(NES.y, fct_reorder(Description.y, NES.y), fill=qvalues.y), showCategory=10) +
+    geom_col(orientation='y') +
+    scale_fill_continuous(low='red', high='blue', guide=guide_colorbar(reverse=TRUE)) +
+    theme_minimal() + xlab("NES (NonLSC 34+ vs 38+)") + ylab(NULL) + theme(text = element_text(size = 14))  +
+    scale_y_discrete(label = function(x) stringr::str_trunc(x, 70))
+
+#Save the plots
+plot(plot1) 
+plot(plot2) 
+plot(plot3)
+
+```
+
