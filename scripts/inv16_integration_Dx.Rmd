@@ -24,6 +24,14 @@ library(forcats)
 library(Nebulosa)
 
 #### 1. Load samples processed from AML3.Rmd, AML5.Rmd, AML7_Dx.Rmd and AML10_Dx.Rmd
+AML3$orig.name <- "AML3"
+AML3$old_clustering <- paste0("AML3_",Idents(AML3))
+AML5$orig.name <- "AML5"
+AML5$old_clustering <- paste0("AML5_",Idents(AML5))
+AML7_Dx$orig.name <- "AML7_Dx"
+AML7_Dx$old_clustering <- paste0("AML7_Dx_",Idents(AML7_Dx))
+AML10_Dx$orig.name <- "AML10_Dx"
+AML10_Dx$old_clustering <- paste0("AML10_Dx_",Idents(AML10_Dx))
 
 #### 2.  Integrate the datasets ####
 dt.list <- unlist(list(c(AML3,AML5,AML7_Dx,AML10_Dx)))
