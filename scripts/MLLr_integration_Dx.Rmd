@@ -603,7 +603,7 @@ plot(count_bar_plot)
 
 ## 7. clusterProfiler
 
-```{r part17, fig.height=3, fig.width=5, message=FALSE}
+```{r part7, fig.height=3, fig.width=5, message=FALSE}
 library(ReactomePA)
 library(forcats)
 library(ggplot2)
@@ -616,7 +616,7 @@ library(dplyr)
 ####1. Do a GSEA analysis
 
 ##1.1. LSC34+ vs NonLSC34+
-markers <- markers.bw.groups2
+markers <- read.csv(file="~/markers.rMLL.LSCvsNonLSC34pos.csv")
 
 #Convert gene names into entrezid
 eg = bitr(markers$gene, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
@@ -636,42 +636,23 @@ y <- gsePathway(genes,
                 verbose = FALSE)
 
 result <- y@result
-# No significance for the LSC 34+
+result$Class <- sign(result$NES)
 
-# result$Class <- sign(result$NES)
+#Get the 10 terms with more NES and plot
+y_short <- result %>%
+  group_by(Class) %>%
+  arrange(desc(abs(NES))) %>%
+  slice_head(n=10)
 
-# gseGO <- gseGO(geneList     = genes,
-#               OrgDb        = org.Hs.eg.db,
-#               ont          = "ALL",
-#               minGSSize    = 10,
-#               maxGSSize    = 500,
-#               pvalueCutoff = 0.05,
-#               verbose      = FALSE)
-#Error
-
-kk2 <- gseKEGG(geneList     = genes,
-               organism     = 'hsa',
-               minGSSize    = 10,
-               pvalueCutoff = 0.05,
-               verbose      = FALSE)
-
-# #Get the 10 terms with more NES and plot
-# y_short <- result %>%
-#   group_by(Class) %>%
-#   arrange(desc(abs(NES))) %>%
-#   slice_head(n=10)
-# 
-# ggplot(y_short, aes(NES, fct_reorder(Description, NES), fill=qvalues), showCategory=10) + 
-#     geom_col(orientation='y') + 
-#     scale_fill_continuous(low='red', high='blue', guide=guide_colorbar(reverse=TRUE)) + 
-#     theme_minimal() + xlab("NES (LSC 34+ vs NonLSC 34+)") + ylab(NULL) + theme(text = element_text(size = 14))  +
-#     scale_y_discrete(label = function(x) stringr::str_trunc(x, 70))
-
-#No term significant
+plot1 <- ggplot(y_short, aes(NES, fct_reorder(Description, NES), fill=qvalues), showCategory=10) +
+    geom_col(orientation='y') +
+    scale_fill_continuous(low='red', high='blue', guide=guide_colorbar(reverse=TRUE)) +
+    theme_minimal() + xlab("NES (LSC 34+ vs NonLSC 34+)") + ylab(NULL) + theme(text = element_text(size = 14))  +
+    scale_y_discrete(label = function(x) stringr::str_trunc(x, 70))
 
 ##1.2. LSC34+ vs 38+
-markers <- markers.bw.groups
-markers_f <- markers[which(markers$cluster=="LSC 34+" | markers$cluster=="NonLSC 38+"),]
+markers <- read.csv(file="~/markers.rMLL.LSCvsNonLSC34vs38.csv")
+markers_f <- markers[which(markers$cluster=="LSC 34+" | markers$cluster=="38+"),]
 
 #Convert gene names into entrezid
 eg = bitr(markers_f$gene, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
@@ -679,7 +660,7 @@ markers_f <- merge(markers_f,eg,by.x="gene",by.y="SYMBOL")
 
 #Sort the gene list
 markers_f$avg_log2FC_aux <- markers_f$avg_log2FC
-markers_f$avg_log2FC_aux[which(markers_f$cluster=="NonLSC 38+")] <- -markers_f$avg_log2FC_aux[which(markers_f$cluster=="NonLSC 38+")]
+markers_f$avg_log2FC_aux[which(markers_f$cluster=="38+")] <- -markers_f$avg_log2FC_aux[which(markers_f$cluster=="38+")]
 markers_f <- markers_f[order(-markers_f$avg_log2FC_aux),]
 genes <- markers_f$avg_log2FC_aux
 names(genes) <- markers_f$ENTREZID
@@ -698,15 +679,15 @@ y_short <- result_LSC34 %>%
   arrange(desc(abs(NES))) %>%
   slice_head(n=10)
 
-plot1 <- ggplot(y_short, aes(NES, fct_reorder(Description, NES), fill=qvalues), showCategory=10) +
+plot2 <- ggplot(y_short, aes(NES, fct_reorder(Description, NES), fill=qvalues), showCategory=10) +
     geom_col(orientation='y') +
     scale_fill_continuous(low='red', high='blue', guide=guide_colorbar(reverse=TRUE)) +
     theme_minimal() + xlab("NES (LSC 34+ vs 38+)") + ylab(NULL) + theme(text = element_text(size = 14))  +
     scale_y_discrete(label = function(x) stringr::str_trunc(x, 70))
 
 ##1.3. NonLSC34+ vs 38+
-markers <- markers.bw.groups
-markers_f <- markers[which(markers$cluster=="NonLSC 34+" | markers$cluster=="NonLSC 38+"),]
+markers <- read.csv(file="/media/trincadojl/data/Projects/MENENDEZPAB_03/misc/markers.rMLL.LSCvsNonLSC34vs38.csv")
+markers_f <- markers[which(markers$cluster=="NonLSC 34+" | markers$cluster=="38+"),]
 
 #Convert gene names into entrezid
 eg = bitr(markers_f$gene, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
@@ -714,7 +695,7 @@ markers_f <- merge(markers_f,eg,by.x="gene",by.y="SYMBOL")
 
 #Sort the gene list
 markers_f$avg_log2FC_aux <- markers_f$avg_log2FC
-markers_f$avg_log2FC_aux[which(markers_f$cluster=="NonLSC 38+")] <- -markers_f$avg_log2FC_aux[which(markers_f$cluster=="NonLSC 38+")]
+markers_f$avg_log2FC_aux[which(markers_f$cluster=="38+")] <- -markers_f$avg_log2FC_aux[which(markers_f$cluster=="38+")]
 markers_f <- markers_f[order(-markers_f$avg_log2FC_aux),]
 genes <- markers_f$avg_log2FC_aux
 names(genes) <- markers_f$ENTREZID
@@ -727,39 +708,9 @@ y <- gsePathway(genes,
 result_NonLSC34 <- y@result
 result_NonLSC34$Class <- sign(result_NonLSC34$NES)
 
-#Get the 10 terms with more NES and plot
-y_short <- result_NonLSC34 %>%
-  group_by(Class) %>%
-  arrange(desc(abs(NES))) %>%
-  slice_head(n=10)
-
-plot2 <- ggplot(y_short, aes(NES, fct_reorder(Description, NES), fill=qvalues), showCategory=10) +
-    geom_col(orientation='y') +
-    scale_fill_continuous(low='red', high='blue', guide=guide_colorbar(reverse=TRUE)) +
-    theme_minimal() + xlab("NES (NonLSC 34+ vs 38+)") + ylab(NULL) + theme(text = element_text(size = 14))  +
-    scale_y_discrete(label = function(x) stringr::str_trunc(x, 70))
-
-#Get the terms enriched in NonLSC34 that are not enriched in 34 (from the previous comparison)
-result_merge <- merge(result_LSC34,result_NonLSC34,by="ID",all=T)
-result_merge2 <- result_merge[which((is.na(result_merge$Description.x) & result_merge$Class==1) | (result_merge$Class==-1)),]
-result_merge2 <- result_merge[which((is.na(result_merge$Description.x) & result_merge$Class.y==1) | (result_merge$Class.y==-1)),]
-
-#Get the 10 terms with more NES and plot
-y_short <- result_merge2 %>%
-  group_by(Class.y) %>%
-  arrange(desc(abs(NES.y))) %>%
-  slice_head(n=10)
-
-plot3 <- ggplot(y_short, aes(NES.y, fct_reorder(Description.y, NES.y), fill=qvalues.y), showCategory=10) +
-    geom_col(orientation='y') +
-    scale_fill_continuous(low='red', high='blue', guide=guide_colorbar(reverse=TRUE)) +
-    theme_minimal() + xlab("NES (NonLSC 34+ vs 38+)") + ylab(NULL) + theme(text = element_text(size = 14))  +
-    scale_y_discrete(label = function(x) stringr::str_trunc(x, 70))
-
 #Save the plots
 plot(plot1) 
 plot(plot2) 
-plot(plot3)
 
 ```
 
