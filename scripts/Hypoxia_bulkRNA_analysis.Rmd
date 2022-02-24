@@ -1,0 +1,796 @@
+---
+title: "Hypoxia_bulkRNA_analysis"
+author: "Adria Closa"
+date: "December 19, 2018"
+output:
+  html_document: 
+    toc: true
+    number_sections: true
+    toc_float: true
+    theme: lumen
+    highlight: default
+    code_folding: hide
+    df_print: paged
+---
+
+# Libraries
+
+List of loading libraries for running code.
+
+```{r libs, include=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(plotly)
+library(impute)
+library(betareg)
+library(limma)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(Hmisc)
+library(stringr)
+#library(tximportData)
+library(tximport)
+library(readr)
+library(edgeR)
+library(geneplotter)
+library(RColorBrewer)
+library(SummarizedExperiment)
+library(sva)
+library(DESeq2)
+library(rmarkdown)
+library(pheatmap)
+library(MASS)
+library(reshape2)
+```
+
+```{r tcga, include=FALSE}
+info.laml <- read.table("/media/aclosa/Seagate Exp/Leukemias/TCGA_LAML/info/LAML_clinicalMatrix", header = TRUE, sep="\t")
+info.laml <- read.table("/media/aclosa/Seagate Exp/Leukemias/TCGA_LAML/info/TCGA_patient_table.txt", header = TRUE, sep="\t")
+id.info <- str_split_fixed(info.laml$Patient_runID,"_",2)[,1]
+info.laml$id.info <- id.info
+
+list.samples <- list.files("/projects_rg/TCGA_LAML/fastq",pattern = "_1.fastq.gz",full.names = TRUE)
+id.samples <- str_split_fixed(str_split_fixed(list.samples,"/",5)[,5],"_",2)[,1]
+
+table(info.laml$id.info %in% id.samples)
+
+# list talia samples
+sel.samples.tcga <- read.table("/media/aclosa/Seagate Exp/Leukemias/Talia_leukemias/info_talia/sel_samples_tcga.txt", header = T, sep="\t")
+
+s.info.laml <- info.laml[grep(paste(sel.samples.tcga$TCGA_id,collapse = "|"),info.laml$Patient_ID1..Patient.Barcode..Case_submiter_id.),]
+
+s.info.laml$code.id <- str_split_fixed(s.info.laml$Patient_ID1..Patient.Barcode..Case_submiter_id.,"-",3)[,3]
+
+sel.samples.tcga <- sel.samples.tcga[match(s.info.laml$code.id,sel.samples.tcga$TCGA_id),]
+s.info.laml$Type <- sel.samples.tcga$Type
+
+```
+
+```{r leucegene, include=FALSE}
+library(openxlsx)
+# list talia samples
+sel.samples.leucegene <- read.table("/media/adria/Seagate Exp/Leukemias/Talia_leukemias/info_talia/sel_samples_leucegene.txt", header = T, sep="\t")
+
+part1 <- read.xlsx("/media/adria/Seagate Exp/Leukemias/Talia_leukemias/info_talia/LEUCEGENE_part1_patientdata.xlsx")
+part2 <- read.xlsx("/media/adria/Seagate Exp/Leukemias/Talia_leukemias/info_talia/LEUCEGENE_part2_patientdata.xlsx")
+part3 <- read.xlsx("/media/adria/Seagate Exp/Leukemias/Talia_leukemias/info_talia/LEUCEGENE_part3_patientdata.xlsx")
+part4 <- read.xlsx("/media/adria/Seagate Exp/Leukemias/Talia_leukemias/info_talia/LEUCEGENE_part4_patientdata.xlsx")
+part5 <- read.xlsx("/media/adria/Seagate Exp/Leukemias/Talia_leukemias/info_talia/LEUCEGENE_part5_patientdata.xlsx")
+
+part1.4 <- rbind(part1,part2,part3,part4)
+#part1.4 <- part1.4[!duplicated(part1.4$Patient_ID2),]
+part1.4 <- part1.4[part1.4$Patient_ID2 %in% sel.samples.leucegene$leucegene_id,]
+
+sel.samples.leucegene <- sel.samples.leucegene[match(part1.4$Patient_ID2,sel.samples.leucegene$leucegene_id),]
+part1.4$Type <- sel.samples.leucegene$Type
+```
+
+```{r count matrix leucegene}
+
+salmon.file <- read.table(file="/projects_rg/LEUCEGENE/salmon/GSE49642/SRR949076/quant.sf", header=TRUE, sep="\t")
+
+ref.gene <- salmon.file[,1]
+ref.gene <- str_split_fixed(ref.gene,fixed("|"),7)
+ref.gene <- cbind(paste(salmon.file$Name),ref.gene[,6])
+
+tx2gene <- as.data.frame(ref.gene)
+
+salm.files.short <- gsub(".sf", "", list.files("/projects_rg/LEUCEGENE/salmon", pattern=".sf", full.names=FALSE,recursive = T))
+salm.files.short <- str_split_fixed(salm.files.short,"/",2)[,1]
+salm.files.full <- list.files("/projects_rg/LEUCEGENE/salmon", full.names=TRUE, recursive = T, pattern="*.sf")
+
+# only load selected samples
+salm.files.full <- salm.files.full[grep(paste(part1.4$Patient_runID,collapse = "|"),salm.files.full)]
+
+txi.salmon <- tximport(salm.files.full, type="salmon", tx2gene = tx2gene, countsFromAbundance = "lengthScaledTPM")
+
+leucegene_counts <- txi.salmon$counts
+
+colnames(leucegene_counts) <- gsub("_rnaseq","",str_split_fixed(salm.files.full,fixed("/"),7)[,6])
+
+#write.table(leucegene_counts,file="/projects_rg/Talia_leukemias/counts/counts_leucegene.txt",col.names = TRUE, row.names = TRUE, sep="\t", quote=FALSE)
+```
+
+```{r count matrix TCGA}
+
+salmon.file <- read.table(file="/projects_rg/TCGA_LAML/salmon/0238d6cb-cb78-4df8-9130-f9d9630c7c1e/quant.sf", header=TRUE, sep="\t")
+
+ref.gene <- salmon.file[,1]
+ref.gene <- str_split_fixed(ref.gene,fixed("|"),7)
+ref.gene <- cbind(paste(salmon.file$Name),ref.gene[,6])
+
+tx2gene <- as.data.frame(ref.gene)
+
+salm.files.short <- gsub(".sf", "", list.files("/projects_rg/TCGA_LAML/salmon", pattern=".sf", full.names=FALSE,recursive = T))
+salm.files.short <- str_split_fixed(salm.files.short,"/",2)[,1]
+salm.files.full <- list.files("/projects_rg/TCGA_LAML/salmon", full.names=TRUE, recursive = T, pattern="*.sf")
+
+# only load selected samples
+#salm.files.full <- salm.files.full[grep(paste(part1.4$Patient_runID,collapse = "|"),salm.files.full)]
+
+txi.salmon <- tximport(salm.files.full, type="salmon", tx2gene = tx2gene, countsFromAbundance = "lengthScaledTPM")
+
+tcga_counts <- txi.salmon$counts
+
+colnames(tcga_counts) <- gsub("_rnaseq","",str_split_fixed(salm.files.short,fixed("."),2)[,1])
+
+#write.table(tcga_counts,file="/projects_rg/TCGA_LAML/salmon/counts_tcga_laml.txt",col.names = TRUE, row.names = TRUE, sep="\t", quote=FALSE)
+```
+
+```{r count matrix healthy}
+
+salmon.file <- read.table(file="/media/adria/Seagate Exp/Leukemias/Talia_leukemias/salmon/SRR1660320/quant.sf", header=TRUE, sep="\t")
+
+ref.gene <- salmon.file[,1]
+ref.gene <- str_split_fixed(ref.gene,fixed("|"),7)
+ref.gene <- cbind(paste(salmon.file$Name),ref.gene[,6])
+
+tx2gene <- as.data.frame(ref.gene)
+
+salm.files.short <- gsub(".sf", "", list.files("/media/adria/Seagate Exp/Leukemias/Talia_leukemias/salmon", pattern=".sf", full.names=FALSE,recursive = T))
+salm.files.short <- str_split_fixed(salm.files.short,"/",2)[,1]
+salm.files.full <- list.files("/media/adria/Seagate Exp/Leukemias/Talia_leukemias/salmon", full.names=TRUE, recursive = T, pattern="*.sf")
+
+# only load selected samples
+#salm.files.full <- salm.files.full[grep(paste(part1.4$Patient_runID,collapse = "|"),salm.files.full)]
+
+txi.salmon <- tximport(salm.files.full, type="salmon", tx2gene = tx2gene, countsFromAbundance = "lengthScaledTPM",dropInfReps=TRUE)
+
+tcga_counts <- txi.salmon$counts
+
+colnames(tcga_counts) <- gsub("_rnaseq","",str_split_fixed(salm.files.short,fixed("."),2)[,1])
+
+#write.table(tcga_counts,file="/media/adria/Seagate Exp/Leukemias/Talia_leukemias/salmon/counts_healthy.txt",col.names = TRUE, row.names = TRUE, sep="\t", quote=FALSE)
+```
+
+```{r limmma tcga, include=TRUE, eval=TRUE}
+tcga_counts <- read.table(file="/media/aclosa/Seagate Exp/Leukemias/Talia_leukemias/counts/counts_tcga_laml.txt", header = TRUE, sep="\t",check.names = FALSE)
+
+# limma
+logCPM <- cpm(tcga_counts, log=TRUE, prior.count=0.5)
+sampledepth <- round(colSums(tcga_counts) / 1e6, digits=1)
+
+m.depth <- sort(sampledepth)
+```
+
+# Sample depth
+
+Total number of reads aligned by sample.
+
+```{r barplot 1 tcga, echo=FALSE, fig.width=13, warning=FALSE}
+par(mfrow=c(2,1))
+mapping.rate <- list.files("/projects_rg/TCGA_LAML/salmon",pattern = "meta_info.json",full.names = TRUE, recursive = TRUE)
+
+mpr <- c()
+for(i in 1:length(mapping.rate)){
+mr <- str_split_fixed(str_split_fixed(readLines(mapping.rate[i])[17]," ",6)[,6],",",2)[,1]
+mpr <- c(mpr,mr)
+}
+names(mpr) <- names(sampledepth)
+mpr <- rbind(as.numeric(mpr),sampledepth)
+
+rownames(mpr)[1] <- "mapped_percent"
+mpr <- t(mpr)
+mpr <- cbind(as.data.frame(mpr),rownames(mpr))
+colnames(mpr)[3] <- "sampleID"
+mpr$sampleID <- as.character(mpr$sampleID)
+mpr <- as.data.frame(mpr[order(mpr[,2]),])
+mpr$sampleID <- factor(mpr$sampleID,levels = mpr$sampleID)
+
+# multiple barplot
+p <- ggplot(mpr,aes(x=sampleID, y=sampledepth)) + geom_bar(stat="identity", fill="indianred3") + theme(plot.title=element_text(hjust=0.5),axis.text.x = element_blank(),axis.ticks.x = element_blank()) +labs(title=paste("Mean of ",round(mean(m.depth),2)," million aligned read counts per sample and ",round(mean(mpr[,1]),2)," mapping"),x="") + geom_hline(yintercept=mean(mpr$sampledepth))
+
+pp <- ggplot(mpr,aes(x=sampleID, y=mapped_percent)) + geom_bar(stat="identity", fill="steelblue") + theme(axis.text.x = element_text(angle=90,hjust=1)) + geom_hline(yintercept=mean(mpr$mapped_percent))
+
+grid.arrange(p,pp,nrow=2)
+```
+
+# Run Limma
+
+```{r limma tcga}
+avgexp <- aveLogCPM(tcga_counts)
+
+plot(density(avgexp), main="Density average LogCPM")
+abline(v=0, col="red", lwd=2, lty=2)
+
+mask <- avgexp > 0
+m.dge <- DGEList(tcga_counts, genes=as.data.frame(rownames(tcga_counts)))
+
+# workflow rnaseq
+cpm <- cpm(m.dge)
+lcpm <- cpm(m.dge, log=TRUE)
+keep.exprs <- rowSums(cpm>1)>=3
+x <- m.dge[keep.exprs, , keep.lib.sizes=FALSE]
+
+# density plot
+library(geneplotter)
+par(mfrow=c(1,2))
+multidensity(as.list(as.data.frame(lcpm)), main="A. Raw data", legend=FALSE, xlab="Log-cpm")
+abline(v=0, col="black", lwd=1, lty=3)
+
+# density plot filtered
+logCPM <- cpm(m.dge,log=TRUE,prior.count = 0.5)
+
+avgexp <- aveLogCPM(tcga_counts)
+mask <- avgexp > 0
+
+dge.filt <- m.dge[mask, , keep.lib.sizes=FALSE]
+#dge.filt.norm <- calcNormFactors(dge.filt)
+logCPM <- cpm(dge.filt, log=TRUE, prior.count = 0.5)
+
+#geneploter
+multidensity(as.list(as.data.frame(logCPM)), main="B. Filtered data", legend = FALSE, xlab="Log-cpm")
+abline(v=0, col="black", lwd=1, lty=3)
+
+x1 <- calcNormFactors(dge.filt, method="TMM")
+x2 <- x1
+x2$samples$norm.factors <- 1
+x2$counts[,1] <- ceiling(x2$counts[,1]*0.05)
+x2$counts[,2] <- x2$counts[,2]*5
+
+par(mfrow=c(1,2))
+lcpm <- cpm(x2, log=TRUE)
+boxplot(lcpm, las=2, main="", col="lightskyblue")
+title(main="A: Unnormalised data",ylab="Log-cpm")
+
+x2 <- calcNormFactors(x2)  
+lcpm <- cpm(x2, log=TRUE)
+boxplot(lcpm, las=2, col="lightskyblue", main="")
+title(main="B: Normalised data",ylab="Log-cpm")
+
+lcpm.f <- lcpm[,colnames(lcpm) %in% s.info.laml$id.info]
+
+d <- dist(t(lcpm.f))
+fit <- cmdscale(d, eig=TRUE, k=2)
+scores <- data.frame(fit$points[,1],fit$points[,2],colnames(lcpm.f))
+rownames(scores) <- colnames(lcpm.f)
+colnames(scores) <- c("Coordinate_1","Coordinate_2","Sample_ID")
+
+scores <- merge(scores,s.info.laml,by.x="Sample_ID",by.y = "id.info", all.x = TRUE)
+scores <- merge(scores,sel.samples.tcga, by.x="code.id",by.y="Type",all.x=TRUE)
+
+# mds plot
+ggplot(scores,aes(x=Coordinate_1,y=Coordinate_2)) + geom_point(aes(colour=Type)) + scale_color_manual(values=c( "#ab74ad","#bb4344","#678a87","#000000","#f3d259","#2e57a5"))
+ggsave("/projects_rg/Talia_leukemias/graph/mds_lcpm_tcga.pdf")
+
+
+# star running limma
+scores1<- as.data.frame(as.matrix(scores))
+
+scores.1 <- scores[scores$Type == "FLT3ITD" | scores$Type == "NK",]
+scores.2 <- scores[scores$Type == "inv(16)" | scores$Type == "NK",]
+scores.3 <- scores[scores$Type == "NPM1_mut" | scores$Type == "NK",]
+scores.4 <- scores[scores$Type == "MLL-R" | scores$Type == "NK",]
+scores.5 <- scores[scores$Type == "t(8;21)" | scores$Type == "NK",]
+list.scores <- list(scores.1,scores.2,scores.3,scores.4,scores.5)
+
+#names.fusions <- names(table(scores$Type))
+
+results.limma <- list()
+for(i in 1:5){
+list.scores[[i]] <- as.data.frame(as.matrix(list.scores[[i]][order(list.scores[[i]]$Sample_ID),]))
+
+mod1 = model.matrix(~Type+Sex,list.scores[[i]])
+mod0 = model.matrix(~Sex,list.scores[[i]])
+
+lcpm.ff <- lcpm.f[,colnames(lcpm.f) %in% list.scores[[i]]$Sample_ID] 
+lcpm.ff <- lcpm.ff[,order(colnames(lcpm.ff))]
+
+IQRs <- apply(lcpm.ff,1,IQR)
+sv <- sva(lcpm.ff[IQRs > quantile(IQRs, prob=0.9),], mod=mod1, mod0=mod0)
+
+cnames <- c(colnames(mod1), paste0("SV",1:sv$n))
+mod1 <- cbind(mod1,sv$sv)
+colnames(mod1) <- cnames
+
+# limma voom
+dge.filt.f <- dge.filt[,colnames(dge.filt) %in% colnames(lcpm.ff)]
+dge.filt.f <- dge.filt.f[,order(colnames(dge.filt.f))]
+v <- voom(dge.filt.f,mod1,normalize="quantile",plot=TRUE,cex=2,las=1)
+fitLV <- lmFit(v,mod1)
+fitLV <- eBayes(fitLV)
+
+resLV <- decideTests(fitLV,p.value = 0.01)
+ttLV <- topTable(fitLV,coef=2,n=Inf)
+results.limma[[i]] <- ttLV
+cat(i,"\n")
+}
+
+write.table(results.limma[[1]],file="/projects_rg/Talia_leukemias/results/res_limma_voom_batch_flt3_itd.txt", col.names = TRUE, row.names = TRUE,quote = FALSE, sep="\t")
+write.table(results.limma[[2]],file="/projects_rg/Talia_leukemias/results/res_limma_voom_batch_inv16.txt", col.names = TRUE, row.names = TRUE,quote = FALSE, sep="\t")
+write.table(results.limma[[3]],file="/projects_rg/Talia_leukemias/results/res_limma_voom_batch_npm1_mut.txt", col.names = TRUE, row.names = TRUE,quote = FALSE, sep="\t")
+write.table(results.limma[[4]],file="/projects_rg/Talia_leukemias/results/res_limma_voom_batch_rmll.txt", col.names = TRUE, row.names = TRUE,quote = FALSE, sep="\t")
+write.table(results.limma[[5]],file="/projects_rg/Talia_leukemias/results/res_limma_voom_batch_t821.txt", col.names = TRUE, row.names = TRUE,quote = FALSE, sep="\t")
+
+
+```
+
+```{r mds hypoxia genes tcga}
+hypoxia <- read.table("/media/aclosa/Seagate Exp/Leukemias/Talia_leukemias/info_talia/hif_talia_geneset.gmx",header = T, sep="\t")
+
+hipo.genes <- lcpm.f[rownames(lcpm.f) %in% hypoxia$HIF.Talia.gene.set,]
+hipo.genes <- hipo.genes[,order(colnames(hipo.genes))]
+scores.hipo <- scores[order(scores$Sample_ID),]
+
+d <- dist(t(hipo.genes))
+fit <- cmdscale(d, eig=TRUE, k=2)
+scores.h <- data.frame(fit$points[,1],fit$points[,2],colnames(hipo.genes))
+rownames(scores.h) <- colnames(hipo.genes)
+colnames(scores.h) <- c("Coordinate_1","Coordinate_2","Sample_ID")
+
+scores.h <- merge(scores.h,scores.hipo,by.x="Sample_ID",by.y = "Sample_ID", all.x = TRUE)
+
+# mds plot
+ggplot(scores.h,aes(x=Coordinate_1.x,y=Coordinate_2.x)) + geom_point(aes(colour=Type)) + scale_color_manual(values=c( "#ab74ad","#bb4344","#678a87","#000000","#f3d259","#2e57a5"))
+ggsave("/projects_rg/Talia_leukemias/graph/mds_lcpm_tcga_hypoxia.pdf")
+
+```
+
+```{r limma leucegene}
+leucegene_counts <- read.table(file="/media/adria/Seagate Exp/Leukemias/Talia_leukemias/counts/counts_leucegene.txt", header = TRUE, sep="\t",check.names = FALSE)
+
+# filtering conflictive sample
+leucegene_counts <- leucegene_counts[,colnames(leucegene_counts) != "SRR1608828"]
+
+# limma
+logCPM <- cpm(leucegene_counts, log=TRUE, prior.count=0.5)
+sampledepth <- round(colSums(leucegene_counts) / 1e6, digits=1)
+
+m.depth <- sort(sampledepth)
+
+# sum reads by runs
+
+names.samples.runs <- names(table(part1.4$Patient_ID2))
+sum.leucegene.counts <- matrix(NA, ncol = length(names.samples.runs),nrow = nrow(leucegene_counts))
+for(i in 1:length(names.samples.runs)){
+  sel.runs <- part1.4[part1.4$Patient_ID2 == names.samples.runs[i],]$Patient_runID
+  if(length(sel.runs) > 1){
+  sum.counts <- rowSums(leucegene_counts[,colnames(leucegene_counts) %in% sel.runs])
+  }
+  if(length(sel.runs)==1){
+  sum.counts <- leucegene_counts[,colnames(leucegene_counts) %in% sel.runs]
+  }
+  sum.leucegene.counts[,i] <- sum.counts
+  cat(i,"\n")
+}
+
+```
+
+# Sample depth LEUCEGENE
+
+Total number of reads aligned by sample.
+
+```{r barplot 1 , echo=FALSE, fig.width=13, warning=FALSE}
+par(mfrow=c(2,1))
+mapping.rate <- list.files("/projects_rg/LEUCEGENE/salmon",pattern = "meta_info.json",full.names = TRUE, recursive = TRUE)
+
+mapping.rate <- mapping.rate[grep(paste(colnames(leucegene_counts),collapse = "|"),mapping.rate)]
+
+mpr <- c()
+for(i in 1:length(mapping.rate)){
+mr <- str_split_fixed(str_split_fixed(readLines(mapping.rate[i])[17]," ",6)[,6],",",2)[,1]
+mpr <- c(mpr,mr)
+}
+names(mpr) <- names(sampledepth)
+mpr <- rbind(as.numeric(mpr),sampledepth)
+
+rownames(mpr)[1] <- "mapped_percent"
+mpr <- t(mpr)
+mpr <- cbind(as.data.frame(mpr),rownames(mpr))
+colnames(mpr)[3] <- "sampleID"
+mpr$sampleID <- as.character(mpr$sampleID)
+mpr <- as.data.frame(mpr[order(mpr[,2]),])
+mpr$sampleID <- factor(mpr$sampleID,levels = mpr$sampleID)
+
+# multiple barplot
+p <- ggplot(mpr,aes(x=sampleID, y=sampledepth)) + geom_bar(stat="identity", fill="indianred3") + theme(plot.title=element_text(hjust=0.5),axis.text.x = element_blank(),axis.ticks.x = element_blank()) +labs(title=paste("Mean of ",round(mean(m.depth),2)," million aligned read counts per sample and ",round(mean(mpr[,1]),2)," mapping"),x="") + geom_hline(yintercept=mean(mpr$sampledepth))
+
+pp <- ggplot(mpr,aes(x=sampleID, y=mapped_percent)) + geom_bar(stat="identity", fill="steelblue") + theme(axis.text.x = element_text(angle=90,hjust=1)) + geom_hline(yintercept=mean(mpr$mapped_percent))
+
+grid.arrange(p,pp,nrow=2)
+```
+
+# Run Limma LEUCEGENE
+
+```{r limma leucegene}
+avgexp <- aveLogCPM(leucegene_counts)
+
+plot(density(avgexp), main="Density average LogCPM")
+abline(v=0, col="red", lwd=2, lty=2)
+
+mask <- avgexp > 0
+m.dge <- DGEList(leucegene_counts, genes=as.data.frame(rownames(leucegene_counts)))
+
+# workflow rnaseq
+cpm <- edgeR::cpm(m.dge)
+lcpm <- edgeR::cpm(m.dge, log=TRUE)
+keep.exprs <- rowSums(cpm>1)>=3
+x <- m.dge[keep.exprs, , keep.lib.sizes=FALSE]
+
+# density plot
+library(geneplotter)
+par(mfrow=c(1,2))
+multidensity(as.list(as.data.frame(lcpm)), main="A. Raw data", legend=FALSE, xlab="Log-cpm")
+abline(v=0, col="black", lwd=1, lty=3)
+
+# density plot filtered
+logCPM <- edgeR::cpm(m.dge,log=TRUE,prior.count = 0.5)
+
+avgexp <- aveLogCPM(leucegene_counts)
+mask <- avgexp > 0
+
+dge.filt <- m.dge[mask, , keep.lib.sizes=FALSE]
+#dge.filt.norm <- calcNormFactors(dge.filt)
+logCPM <- edgeR::cpm(dge.filt, log=TRUE, prior.count = 0.5)
+
+#geneploter
+multidensity(as.list(as.data.frame(logCPM)), main="B. Filtered data", legend = FALSE, xlab="Log-cpm")
+abline(v=0, col="black", lwd=1, lty=3)
+
+x1 <- calcNormFactors(dge.filt, method="TMM")
+x2 <- x1
+x2$samples$norm.factors <- 1
+x2$counts[,1] <- ceiling(x2$counts[,1]*0.05)
+x2$counts[,2] <- x2$counts[,2]*5
+
+par(mfrow=c(1,2))
+lcpm <- edgeR::cpm(x2, log=TRUE)
+boxplot(lcpm, las=2, main="", col="lightskyblue")
+title(main="A: Unnormalised data",ylab="Log-cpm")
+
+x2 <- calcNormFactors(x2)  
+lcpm <- edgeR::cpm(x2, log=TRUE)
+boxplot(lcpm, las=2, col="lightskyblue", main="")
+title(main="B: Normalised data",ylab="Log-cpm")
+
+lcpm.f <- lcpm[,colnames(lcpm) %in% part1.4$Patient_runID]
+
+d <- dist(t(lcpm.f))
+fit <- cmdscale(d, eig=TRUE, k=2)
+scores <- data.frame(fit$points[,1],fit$points[,2],colnames(lcpm.f))
+rownames(scores) <- colnames(lcpm.f)
+colnames(scores) <- c("Coordinate_1","Coordinate_2","Sample_ID")
+
+scores <- merge(scores,part1.4,by.x="Sample_ID",by.y = "Patient_runID", all.x = TRUE)
+
+# mds plot
+#ggplot(scores,aes(x=Coordinate_1,y=Coordinate_2)) + geom_point(aes(colour=Type)) + geom_text(aes(label=Patient_ID2),hjust=0,vjust=0)
+ggplot(scores,aes(x=Coordinate_1,y=Coordinate_2)) + geom_point(aes(colour=Type)) + scale_color_manual(values=c( "#ab74ad","#bb4344","#678a87","#000000","#f3d259","#2e57a5"))
+ggsave("/projects_rg/Talia_leukemias/graph/mds_lcpm_leucegene_withlabels.pdf")
+
+
+# star running limma
+scores<- as.data.frame(as.matrix(scores))
+
+scores.1 <- scores[scores$Type == "FLT3ITD" | scores$Type == "NK",]
+scores.2 <- scores[scores$Type == "inv(16)" | scores$Type == "NK",]
+#scores.2$Type <- gsub("inv(16)","inv16",scores.2$Type, fixed=TRUE)
+scores.3 <- scores[scores$Type == "NPM1_mut" | scores$Type == "NK",]
+scores.4 <- scores[scores$Type == "MLL-R" | scores$Type == "NK",]
+scores.5 <- scores[scores$Type == "t(8;21)" | scores$Type == "NK",]
+scores.6 <- scores[scores$Type == "MLL-R" | scores$Type == "inv(16)",]
+scores.7 <- scores[scores$Type == "MLL-R" | scores$Type == "t(8;21)",]
+scores.8 <- scores[scores$Type == "inv(16)" | scores$Type == "t(8;21)",]
+list.scores <- list(scores.1,scores.2,scores.3,scores.4,scores.5,scores.6,scores.7,scores.8)
+list.scores[[6]]$Type = gsub("MLL-R","A-MLL-R",list.scores[[6]]$Type)
+list.scores[[7]]$Type = gsub("MLL-R","A-MLL-R",list.scores[[7]]$Type)
+list.scores[[8]]$Type = gsub("t(8;21)","A-t(8;21)",list.scores[[8]]$Type,fixed = T)
+
+#names.fusions <- names(table(scores$Type))
+
+results.limma <- list()
+for(i in 1:8){
+list.scores[[i]] <- as.data.frame(as.matrix(list.scores[[i]][order(list.scores[[i]]$Sample_ID),]))
+
+mod1 = model.matrix(~Type,list.scores[[i]])
+#mod0 = model.matrix(~Sex,list.scores[[i]])
+
+lcpm.ff <- lcpm.f[,colnames(lcpm.f) %in% list.scores[[i]]$Sample_ID] 
+lcpm.ff <- lcpm.ff[,order(colnames(lcpm.ff))]
+
+IQRs <- apply(lcpm.ff,1,IQR)
+sv <- sva(lcpm.ff[IQRs > quantile(IQRs, prob=0.9),], mod=mod1, mod0=NULL)
+
+cnames <- c(colnames(mod1), paste0("SV",1:sv$n))
+mod1 <- cbind(mod1,sv$sv)
+colnames(mod1) <- cnames
+
+# limma voom
+dge.filt.f <- dge.filt[,colnames(dge.filt) %in% colnames(lcpm.ff)]
+dge.filt.f <- dge.filt.f[,order(colnames(dge.filt.f))]
+v <- voom(dge.filt.f,mod1,normalize="quantile",plot=TRUE)
+corfit <- duplicateCorrelation(v,mod1,block = list.scores[[i]]$Patient_ID2)
+v <- voom(dge.filt.f,mod1,block= list.scores[[i]]$Patient_ID2, correlation=corfit$consensus.correlation,normalize="quantile",plot=TRUE)
+corfit <- duplicateCorrelation(v,mod1,block=list.scores[[i]]$Patient_ID2)
+fitLV <- lmFit(v,mod1,block=list.scores[[i]]$Patient_ID2,correlation=corfit$consensus.correlation)
+fitLV <- eBayes(fitLV)
+
+resLV <- decideTests(fitLV,p.value = 0.01)
+ttLV <- topTable(fitLV,coef=2,n=Inf)
+results.limma[[i]] <- ttLV
+cat(i,"\n")
+}
+
+write.table(results.limma[[1]],file="/media/aclosa/Seagate Exp/Leukemias/Talia_leukemias/results/leucegene/correlation/res_limma_voom_batch_flt3_itd_v2.txt", col.names = TRUE, row.names = TRUE,quote = FALSE, sep="\t")
+write.table(results.limma[[2]],file="/media/aclosa/Seagate Exp/Leukemias/Talia_leukemias/results/leucegene/correlation/res_limma_voom_batch_inv16_v2.txt", col.names = TRUE, row.names = TRUE,quote = FALSE, sep="\t")
+write.table(results.limma[[3]],file="/media/aclosa/Seagate Exp/Leukemias/Talia_leukemias/results/leucegene/correlation/res_limma_voom_batch_npm1_mut_v2.txt", col.names = TRUE, row.names = TRUE,quote = FALSE, sep="\t")
+write.table(results.limma[[4]],file="/media/aclosa/Seagate Exp/Leukemias/Talia_leukemias/results/leucegene/correlation/res_limma_voom_batch_rmll_V2.txt", col.names = TRUE, row.names = TRUE,quote = FALSE, sep="\t")
+write.table(results.limma[[5]],file="/media/aclosa/Seagate Exp/Leukemias/Talia_leukemias/results/leucegene/correlation/res_limma_voom_batch_t821_V2.txt", col.names = TRUE, row.names = TRUE,quote = FALSE, sep="\t")
+write.table(results.limma[[6]],file="/media/adria/Seagate Exp/Leukemias/Talia_leukemias/results/leucegene/correlation/res_limma_voom_batch_inv16_vs_rmll_V2.txt", col.names = TRUE, row.names = TRUE,quote = FALSE, sep="\t")
+write.table(results.limma[[7]],file="/media/adria/Seagate Exp/Leukemias/Talia_leukemias/results/leucegene/correlation/res_limma_voom_batch_t821_vs_rmll_V2.txt", col.names = TRUE, row.names = TRUE,quote = FALSE, sep="\t")
+write.table(results.limma[[8]],file="/media/adria/Seagate Exp/Leukemias/Talia_leukemias/results/leucegene/correlation/res_limma_voom_batch_inv16_vs_t821_V2.txt", col.names = TRUE, row.names = TRUE,quote = FALSE, sep="\t")
+
+# plot ranks
+for (i in 1:length(results.limma)){
+  rank = -log10(results.limma[[i]]$P.Value)*results.limma[[i]]$logFC
+  rank = as.data.frame(cbind(rownames(results.limma[[i]]),rank))
+  write.table(rank,paste("/media/adria/Seagate Exp/Leukemias/Talia_leukemias/results/leucegene/correlation/rank_leucegene_inv16_vs_t821.rnk",sep=""),col.names = FALSE, row.names = FALSE,quote = FALSE, sep = "\t")
+}
+
+```
+
+```{r mds hypoxia genes}
+hypoxia <- read.table("/media/adria/Seagate Exp/Leukemias/Talia_leukemias/info_talia/hif_talia_geneset.gmx",header = T, sep="\t")
+
+hipo.genes <- lcpm.f[rownames(lcpm.f) %in% hypoxia$HIF.Talia.gene.set,]
+hipo.genes <- hipo.genes[,order(colnames(hipo.genes))]
+scores.hipo <- scores[order(scores$Sample_ID),]
+
+d <- dist(t(hipo.genes))
+fit <- cmdscale(d, eig=TRUE, k=2)
+scores.h <- data.frame(fit$points[,1],fit$points[,2],colnames(hipo.genes))
+rownames(scores.h) <- colnames(hipo.genes)
+colnames(scores.h) <- c("Coordinate_1","Coordinate_2","Sample_ID")
+
+scores.h <- merge(scores.h,scores.hipo,by.x="Sample_ID",by.y = "Sample_ID", all.x = TRUE)
+
+# mds plot
+ggplot(scores.h,aes(x=Coordinate_1.x,y=Coordinate_2.x)) + geom_point(aes(colour=Type)) + scale_color_manual(values=c( "#ab74ad","#bb4344","#678a87","#000000","#f3d259","#2e57a5"))
+ggsave("/projects_rg/Talia_leukemias/graph/mds_lcpm_leucegene_hypoxia.pdf")
+
+# heatmap hipoxia
+rownames(scores.h) = scores.h$Sample_ID
+
+annotation_colors = list(Sex = c("F" ="#F4B5BD","M" = "#85D4E3"),
+                         Type = c("NK" = "#000000","FLT3ITD" = "#ab74ad","inv(16)" = "#bb4344","MLL-R" = "#678a87","NPM1_mut" = "#f3d259","t(8;21)" = "#2e57a5"))
+pheatmap(hipo.genes,annotation_col = scores.h[,c(11,15)],annotation_colors = annotation_colors,fontsize_row = 6,
+         show_rownames = TRUE,show_colnames = FALSE,scale="row",clustering_method = "ward.D",breaks=seq(-2, 2, by = 0.5),
+         color = colorRampPalette(c("navy","white","firebrick3"))(8),cutree_cols = 4, cutree_rows = 2,border_color = NA, legend = TRUE,
+         cellwidth = 3,cellheight =4)
+
+# violint plot for HIF1 and HIF2
+hif.genes = lcpm.f[rownames(lcpm.f) %in% c("HIF1A","EPAS1"),]
+
+data.hif = as.data.frame(t(hif.genes))
+data.hif$Type = scores.h$Type
+
+p1 <- ggplot(data.hif, aes(x=Type, y=EPAS1, fill=Type)) + # fill=name allow to automatically dedicate a color for each group
+  geom_violin()+ geom_boxplot(width=0.1, color="grey", alpha=0.2) + ylab("EPAS1 (logCPM)") + xlab("Group") + scale_fill_manual(values=c( "#ab74ad","#bb4344","#678a87","#000000","#f3d259","#2e57a5")) +theme_minimal()
+p2 <- ggplot(data.hif, aes(x=Type, y=HIF1A, fill=Type)) + # fill=name allow to automatically dedicate a color for each group
+  geom_violin() + geom_boxplot(width=0.1, color="grey", alpha=0.2) + ylab("HIF1A (logCPM)") + xlab("Group") + scale_fill_manual(values=c( "#ab74ad","#bb4344","#678a87","#000000","#f3d259","#2e57a5")) +theme_minimal()
+
+```
+
+# analysis samples from TARGET
+
+```{r target samples}
+counts.target.aml = read.table("/media/adria/Seagate Exp/Leukemias/TARGET_AML_phase1/counts_target_aml_phase1.txt", header = T, sep="\t")
+# info target
+info.target.aml = read.table("/media/adria/Seagate Exp/Leukemias/TARGET_AML_phase1/info_target_aml.txt", header = T, sep = "\t")
+# sample selection talia
+sel.talia = read.table("/media/adria/Seagate Exp/Leukemias/Talia_leukemias/info_talia/target_samples_Selection.txt", header = T, sep = "\t")
+```
+
+```{r limma normal target}
+logCPM <- edgeR::cpm(counts.target.aml, log=TRUE, prior.count=0.5)
+sampledepth <- round(colSums(counts.target.aml) / 1e6, digits=1)
+
+m.depth <- sort(sampledepth)
+
+barplot(m.depth, names.arg = rownames(m.depth), las=2, main = "Sample Depth: Reads * 1e6 per sample", col = "indianred3")
+legend("topleft", legend=paste("Mean of ",round(mean(m.depth))," million aligned read counts per sample",sep=""), fill="indianred3")
+
+avgexp <- aveLogCPM(counts.target.aml)
+
+plot(density(avgexp), main="Density average LogCPM")
+abline(v=0, col="red", lwd=2, lty=2)
+
+mask <- avgexp > 0
+m.dge <- DGEList(counts.target.aml, genes=as.data.frame(rownames(counts.target.aml)))
+
+# workflow rnaseq
+cpm <- edgeR::cpm(m.dge)
+lcpm <- edgeR::cpm(m.dge, log=TRUE)
+keep.exprs <- rowSums(cpm>1)>=3
+x <- m.dge[keep.exprs, , keep.lib.sizes=FALSE]
+
+# density plot
+par(mfrow=c(1,2))
+multidensity(as.list(as.data.frame(lcpm)), main="A. Raw data", legend=FALSE, xlab="Log-cpm")
+abline(v=0, col="black", lwd=1, lty=3)
+
+# density plot filtered
+logCPM <- edgeR::cpm(m.dge,log=TRUE,prior.count = 0.5)
+
+avgexp <- aveLogCPM(mm.counts)
+mask <- avgexp > 0
+
+dge.filt <- m.dge[mask, , keep.lib.sizes=FALSE]
+#dge.filt.norm <- calcNormFactors(dge.filt)
+logCPM <- edgeR::cpm(dge.filt, log=TRUE, prior.count = 0.5)
+
+#geneploter
+multidensity(as.list(as.data.frame(logCPM)), main="B. Filtered data", legend = FALSE, xlab="Log-cpm")
+abline(v=0, col="black", lwd=1, lty=3)
+
+x1 <- calcNormFactors(dge.filt, method="TMM")
+x2 <- x1
+x2$samples$norm.factors <- 1
+x2$counts[,1] <- ceiling(x2$counts[,1]*0.05)
+x2$counts[,2] <- x2$counts[,2]*5
+
+par(mfrow=c(1,2))
+lcpm <- edgeR::cpm(x2, log=TRUE)
+boxplot(lcpm, las=2, main="", col="lightskyblue")
+title(main="A: Unnormalised data",ylab="Log-cpm")
+
+x2 <- calcNormFactors(x2)  
+lcpm <- edgeR::cpm(x2, log=TRUE)
+boxplot(lcpm, las=2, col="lightskyblue", main="")
+title(main="B: Normalised data",ylab="Log-cpm")
+
+# filter only samples for talia and do a MDS
+
+#write.table(lcpm,"/media/aclosa/My Passport/Leukemias/TARGET_AML_phase1/AML_all_samples_lcpm.txt", col.names = TRUE, row.names = TRUE, sep="\t", quote = FALSE)
+
+lcpm.aml = read.table("/media/adria/Seagate Exp/Leukemias/TARGET_AML_phase1/AML_all_samples_lcpm.txt", header = T, sep = "\t")
+
+merge.info.aml = merge(sel.talia,info.target.aml,by.x="TARGET.USI",by.y="Patient_ID1",all.x=TRUE)
+
+lcpm.aml.f = lcpm.aml[,colnames(lcpm.aml) %in% merge.info.aml$Patient_runID]
+merge.info.aml = merge.info.aml[merge.info.aml$Patient_runID %in% colnames(lcpm.aml.f),]
+
+lcpm.aml.f = lcpm.aml.f[,order(colnames(lcpm.aml.f))]
+merge.info.aml = merge.info.aml[order(merge.info.aml$Patient_runID),]
+
+# remove runs outlyers c("TARGET-20-PANLLX", "TARGET-20-PANLIZ"),  c("SRR1286850", "SRR1286894")
+lcpm.aml.f = lcpm.aml.f[,colnames(lcpm.aml.f) %nin% c("SRR1286850", "SRR1286894")]
+merge.info.aml = merge.info.aml[merge.info.aml$Patient_runID %nin% c("SRR1286850", "SRR1286894"),]
+
+d <- dist(t(lcpm.aml.f))
+fit <- cmdscale(d, eig=TRUE, k=2)
+scores <- data.frame(fit$points[,1],fit$points[,2],colnames(lcpm.aml.f))
+rownames(scores) <- colnames(lcpm.aml.f)
+colnames(scores) <- c("Coordinate_1","Coordinate_2","Sample_ID")
+
+scores <- merge(scores,merge.info.aml,by.x="Sample_ID",by.y = "Patient_runID", all.x = TRUE)
+
+ggplot(scores,aes(x=Coordinate_1,y=Coordinate_2)) + geom_point(aes(colour=Group)) + scale_color_manual(values=c("#000000","#ab74ad","#bb4344","#678a87","#f3d259","#2e57a5"))
+
+# mds only using hypoxia genes
+hypoxia <- read.table("/media/adria/Seagate Exp/Leukemias/Talia_leukemias/info_talia/hif_talia_geneset.gmx",header = T, sep="\t")
+
+lcpm.hypox = lcpm.aml.f[rownames(lcpm.aml.f) %in% hypoxia$HIF.Talia.gene.set,]
+
+d <- dist(t(lcpm.hypox))
+fit <- cmdscale(d, eig=TRUE, k=2)
+scores <- data.frame(fit$points[,1],fit$points[,2],colnames(lcpm.aml.f))
+rownames(scores) <- colnames(lcpm.aml.f)
+colnames(scores) <- c("Coordinate_1","Coordinate_2","Sample_ID")
+
+scores <- merge(scores,merge.info.aml,by.x="Sample_ID",by.y = "Patient_runID", all.x = TRUE)
+
+ggplot(scores,aes(x=Coordinate_1,y=Coordinate_2)) + geom_point(aes(colour=Group)) + scale_color_manual(values=c("#000000","#ab74ad","#bb4344","#678a87","#f3d259","#2e57a5"))
+
+# heatmap of expresion in hipoxia
+rownames(merge.info.aml) = merge.info.aml$Patient_runID
+
+annotation_colors = list(Sex = c("F" ="#F4B5BD","M" = "#85D4E3"),
+                         Group = c("control" = "#000000","FLT3ITD" = "#ab74ad","INV16" = "#bb4344","MLL" = "#678a87","NPM" = "#f3d259","t821" = "#2e57a5"))
+pheatmap(lcpm.hypox,annotation_col = merge.info.aml[,c(2,10)],annotation_colors = annotation_colors,fontsize_row = 6,
+         show_rownames = TRUE,show_colnames = FALSE,scale="row",clustering_method = "ward.D",breaks=seq(-2, 2, by = 0.5),
+         color = colorRampPalette(c("navy","white","firebrick3"))(8),cutree_cols = 4, cutree_rows = 2,border_color = NA, legend = TRUE,
+         cellwidth = 3,cellheight =4)
+
+# violint plot for HIF1 and HIF2
+hif.genes = lcpm.aml.f[rownames(lcpm.aml.f) %in% c("HIF1A","EPAS1"),]
+
+data.hif = as.data.frame(t(hif.genes))
+data.hif$Group = merge.info.aml$Group
+
+p1 <- ggplot(data.hif, aes(x=Group, y=EPAS1, fill=Group)) + # fill=name allow to automatically dedicate a color for each group
+  geom_violin()+ geom_boxplot(width=0.1, color="grey", alpha=0.2) + ylab("EPAS1 (logCPM)") + scale_fill_manual(values=c("#000000","#ab74ad","#bb4344","#678a87","#f3d259","#2e57a5")) +theme_minimal()
+p2 <- ggplot(data.hif, aes(x=Group, y=HIF1A, fill=Group)) + # fill=name allow to automatically dedicate a color for each group
+  geom_violin() + geom_boxplot(width=0.1, color="grey", alpha=0.2) + ylab("HIF1A (logCPM)") + scale_fill_manual(values=c("#000000","#ab74ad","#bb4344","#678a87","#f3d259","#2e57a5")) +theme_minimal()
+
+# diferential expresion analysis using limma
+
+lcpm.aml.f = as.matrix(lcpm.aml.f)
+
+mod1 = model.matrix(~0+Group+Sex,merge.info.aml)
+mod0 = model.matrix(~0+Sex,merge.info.aml)
+
+#IQRs <- apply(lcpm.dx,1,IQR)
+sv <- sva(lcpm.aml.f, mod=mod1, mod0=mod0)
+
+cnames <- c(colnames(mod1), paste0("SV",1:sv$n))
+mod1 <- cbind(mod1,sv$sv)
+colnames(mod1) <- cnames
+
+# limma voom
+dge.filt.f <- dge.filt[,colnames(dge.filt) %in% colnames(lcpm.aml.f)]
+dge.filt.f <- dge.filt.f[,order(colnames(dge.filt.f))]
+v <- voom(dge.filt.f,mod1,normalize="quantile",plot=TRUE)
+
+fitLV <- lmFit(v,mod1)
+
+cont.matrix = makeContrasts(INV16vsControl = GroupINV16 - Groupcontrol,
+                            FLT3ITDvsControl = GroupFLT3ITD - Groupcontrol,
+                            MLLvsControl = GroupMLL - Groupcontrol,
+                            NPMvsControl = GroupNPM - Groupcontrol,
+                            t821vsControl = Groupt821 - Groupcontrol,
+                            inv16vsMLL = GroupINV16 - GroupMLL,
+                            t821vsMLL = Groupt821 - GroupMLL,
+                            inv16vst821 = GroupINV16 - Groupt821,
+                            levels = mod1)
+
+fit2 <- contrasts.fit(fitLV, cont.matrix)
+fitLVe = eBayes(fit2)
+
+results.limma = list()
+contras.vector = c("INV16vsControl","FLT3ITDvsControl","MLLvsControl","NPMvsControl","t821vsControl","inv16vsMLL","t821vsMLL","inv16vst821")
+for (i in 1:length(contras.vector)){
+ttLV <- topTable(fitLVe,coef=contras.vector[i],n=Inf,adjust.method = "BH")
+results.limma[[i]] <- ttLV
+}
+
+#resLV <- decideTests(fitLVe,p.value = 0.05/20451)
+#vennDiagram(resLV[,1:4])
+
+for (i in 1:length(results.limma)){
+  write.table(results.limma[[i]],paste("/media/aclosa/My Passport/Leukemias/Talia_leukemias/results/limma_target_",contras.vector[i],".txt",sep=""),col.names = TRUE, row.names = FALSE,quote = FALSE, sep = "\t")
+}
+
+# anova results 
+anova.limma = topTableF(fitLVe, number=Inf)
+write.table(anova.limma,paste("/media/aclosa/My Passport/Leukemias/leukemia_adria/results/limma_anova_target.txt",sep=""),col.names = TRUE, row.names = FALSE,quote = FALSE, sep = "\t")
+
+# plot ranks
+for (i in 1:length(results.limma)){
+  rank = -log10(results.limma[[i]]$P.Value)*results.limma[[i]]$logFC
+  rank = as.data.frame(cbind(rownames(results.limma[[i]]),rank))
+  write.table(rank,paste("/media/adria/Seagate Exp/Leukemias/Talia_leukemias/results/rank_target_inv16_vs_t821.rnk",sep=""),col.names = FALSE, row.names = FALSE,quote = FALSE, sep = "\t")
+}
+
+```
+
+```{r}
+# ccle, select THP1 for MLLr, kasumi1 t821 and ME1 inv16
+
+ccle.data = read.table("/media/adria/Seagate Exp/CCLE/CCLE_RNAseq_rsem_genes_tpm_20180929.txt",header = T, sep = "\t")
+ccle.aml = ccle.data[,grep(paste(c("THP1","KASUMI1","ME1"),collapse = "|"),colnames(ccle.data))]
+rownames(ccle.aml) = ccle.data$gene_id
+# genes ENSG00000100644 ENSG00000116016
+ccle.aml[grep(c("ENSG00000100644|ENSG00000116016"),rownames(ccle.aml)),]
+
+```
